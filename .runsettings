@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <TargetPlatform>x64</TargetPlatform>
+  </RunConfiguration>
+
+  <Catch2Adapter>
+    <FilenameFilter>^.*Tests?$</FilenameFilter>
+    <DiscoverCommandLine>--verbosity high --list-tests --reporter xml *</DiscoverCommandLine>
+    <DiscoverTimeout>10000</DiscoverTimeout>
+    <Logging>normal</Logging>
+  </Catch2Adapter>
+
+  <BoostTest>
+    <Filters>
+      <Exclude>
+        <Pattern>.*</Pattern>
+      </Exclude>
+    </Filters>
+  </BoostTest>
+</RunSettings>
