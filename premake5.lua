@@ -55,7 +55,6 @@ project "Engine_Spec"
    language "C++"
    objdir ("obj/" .. outputdir)
    targetdir ("build/" .. outputdir)
-   targetname "LemonadeTest"
    debugdir "."
 
    files

@@ -5,7 +5,7 @@
   </RunConfiguration>
 
   <Catch2Adapter>
-    <FilenameFilter>^.*Tests?$</FilenameFilter>
+    <FilenameFilter>^.*_Spec$</FilenameFilter>
     <DiscoverCommandLine>--verbosity high --list-tests --reporter xml *</DiscoverCommandLine>
     <DiscoverTimeout>10000</DiscoverTimeout>
     <Logging>normal</Logging>
