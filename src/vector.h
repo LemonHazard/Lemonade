@@ -1,6 +1,6 @@
 #pragma once
 
-struct Vec2 {
+struct Vector2 {
     union {
         struct {
             float x;
@@ -11,9 +11,13 @@ struct Vec2 {
     const float& operator[](size_t index) const {
         return (&x)[index];
     }
+
+    operator const float*() const {
+        return &x; 
+    }
 };
 
-struct Vec3 {
+struct Vector3 {
     union {
         struct {
             float x;
@@ -30,15 +34,19 @@ struct Vec3 {
             float y;
             float r;
         };
-        Vec2 xy;
+        Vector2 xy;
     };
 
     const float& operator[](size_t index) const {
         return (&x)[index];
     }
+
+    operator const float*() const {
+        return &x; 
+    }
 };
 
-struct Vec4 {
+struct Vector4 {
     union {
         struct {
             float x;
@@ -52,11 +60,15 @@ struct Vec4 {
             float b;
             float a;
         };
-        Vec2 xy;
-        Vec3 xyz;   
+        Vector2 xy;
+        Vector3 xyz;
     };
     
     const float& operator[](size_t index) const {
         return (&x)[index];
+    }
+
+    operator const float*() const {
+        return &x; 
     }
 };
