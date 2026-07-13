@@ -54,6 +54,7 @@ void window_create(Window *window)
                                          nullptr,
                                          window->native->wndclass.hInstance,
                                          nullptr);
+    SetPropW(window->native->hwnd, L"Window", (HANDLE)window);
 
     window_set_color_theme(window);
 
@@ -218,18 +219,22 @@ void window_read_input(Window *window)
 
 LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    auto window = (Window *)GetPropW(hWnd, L"Window");
+
     switch (msg)
     {
     case WM_SIZE:
     {
         if (wParam == SIZE_MINIMIZED)
             return 0;
-        //if (window == nullptr)
-        //{
-        //    log_error("Win32Window not found");
-        //    return 0;
-        //}
-        //window->Resize((UINT)LOWORD(lParam), (UINT)HIWORD(lParam));
+        if (window == nullptr)
+        {
+            log_error("Window not found");
+            return 0;
+        }
+        window->width  = (UINT)LOWORD(lParam);
+        window->height = (UINT)HIWORD(lParam);
+        log_info("Window resized (%dx%d)", window->width, window->height);
     } return 0;
     case WM_PAINT:
     {
@@ -243,6 +248,7 @@ LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     case WM_DESTROY:
         PostQuitMessage(0);
+        log_info("Window destroyed");
         return 0;
     }
 
