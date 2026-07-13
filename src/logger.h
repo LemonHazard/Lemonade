@@ -1,11 +1,6 @@
 #pragma once
 
 #include <cstdio>
-#include <source_location>
-
-#if defined(_MSC_VER)
-    #define __PRETTY_FUNCTION__     __FUNCSIG__
-#endif
 
 #define CONSOLE_COLOR_RESET   "\x1b[0m"
 #define CONSOLE_COLOR_RED     "\x1b[31m"
@@ -19,8 +14,7 @@
     do { \
         char buffer[256]; \
         std::snprintf(buffer, sizeof(buffer), format, __VA_ARGS__); \
-        const std::source_location location = std::source_location::current(); \
-        std::string_view file_name{location.file_name()}; \
+        std::string_view file_name{__FILE__}; \
         auto pos = file_name.find_last_of("\\/"); \
         if (pos != std::string_view::npos) { \
             file_name = file_name.substr(pos + 1); \
