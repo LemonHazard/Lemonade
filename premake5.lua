@@ -6,7 +6,7 @@ outputdir = "%{cfg.buildcfg}-%{cfg.system}-%{cfg.architecture}"
 
 project "Engine"
    location "."
-   kind "ConsoleApp"
+   kind "WindowedApp"
    dpiawareness "HighPerMonitor"
    language "C++"
    objdir ("obj/" .. outputdir)

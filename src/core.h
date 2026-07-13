@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 typedef int8_t  i8;
 typedef int16_t i16;
@@ -15,7 +16,9 @@ typedef uint64_t u64;
 typedef float  r32;
 typedef double r64;
 
-typedef const char *cstr;
+typedef const char  *cstr;
+typedef std::string  str;
+typedef std::wstring wstr;
 
 constexpr u64 KB = 1000;
 constexpr u64 MB = 1000 * KB;

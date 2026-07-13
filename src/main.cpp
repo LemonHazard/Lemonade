@@ -1,16 +1,26 @@
 #include "core.h"
 #include "vector.h"
-
-#include <cstdio>
+#include "window.h"
+#include "logger.h"
 
 int main(int, char**)
 {
-    printf("Fresh Lemonade on %s!\n", OS);
+    log_info("Fresh Lemonade on %s!", OS);
 
-    Vector3 location = { .x = 1.0f, .y = 2.0f, .z = 3.0f };
+    Window window = { 
+        .title  = L"Lemonade",
+        .width  = 1920,
+        .height = 1080,
+    };
+    window_create(&window);
+    window_show(&window);
 
-    printf("location = Vec2(%.2f, %.2f)\n", location.xy.x, location.xy.y);
-    printf("Gibibyte is %llu bytes\n", GiB);
+    while (!window.closed)
+    {
+        window_read_input(&window);
+    }
+
+    window_destroy(&window);
 
     return 0;
 }
