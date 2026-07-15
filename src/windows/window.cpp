@@ -11,6 +11,8 @@ struct Native_Window {
     WNDCLASSEXW wndclass;
     HWND        hwnd;
     HMODULE     huxtheme;
+
+    operator HWND() const { return this->hwnd; }
 };
 
 LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -24,6 +26,7 @@ void window_create(Window *window)
     if (window->native == nullptr)
     {
         log_error("Can't create a window");
+        return;
     }
 
     window->native->wndclass.cbSize        = sizeof(WNDCLASSEXW);
