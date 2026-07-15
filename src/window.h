@@ -2,7 +2,7 @@
 
 #include "core.h"
 
-struct Native_Window;
+class Native_Window;
 
 class Window
 {

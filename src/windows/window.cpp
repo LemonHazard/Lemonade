@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <windows.h>
 
-struct Native_Window {
+class Native_Window
+{
+public:
     WNDCLASSEXW wndclass;
     HWND        hwnd;
     HMODULE     huxtheme;
@@ -21,7 +23,7 @@ struct Native_Window {
 
 Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(height), closed(false)
 {
-    this->native = (Native_Window *)std::calloc(1, sizeof(Native_Window));
+    this->native = new Native_Window();
 
     if (this->native == nullptr)
     {
@@ -70,7 +72,7 @@ Window::~Window()
                      this->native->wndclass.hInstance);
     FreeLibrary(this->native->huxtheme);
 
-    std::free(this->native);
+    delete this->native;
 }
 
 void Window::show()
