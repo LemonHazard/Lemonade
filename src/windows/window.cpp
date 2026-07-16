@@ -10,27 +10,20 @@
 class Native_Window
 {
 public:
+    static LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+    void use_system_app_mode();
+
+    operator HWND() const { return this->hwnd; }
+
     WNDCLASSEXW wndclass;
     HWND        hwnd;
     HMODULE     huxtheme;
-
-    void set_color_theme();
-
-    static LRESULT WINAPI wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-    operator HWND() const { return this->hwnd; }
 };
 
 Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(height), closed(false)
 {
     this->native = new Native_Window();
-
-    if (this->native == nullptr)
-    {
-        log_error("Can't create a window");
-        return;
-    }
-
     this->native->wndclass.cbSize        = sizeof(WNDCLASSEXW);
     this->native->wndclass.style         = CS_CLASSDC;
     this->native->wndclass.lpfnWndProc   = this->native->wnd_proc;
@@ -60,7 +53,7 @@ Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(
 
     SetPropW(this->native->hwnd, L"Window", (HANDLE)this);
 
-    this->native->set_color_theme();
+    this->native->use_system_app_mode();
 
     log_info("Window created (%dx%d)", this->width, this->height);
 }
@@ -96,7 +89,7 @@ void Window::read_input()
 
 LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    auto window = (Window*)GetPropW(hWnd, L"Window");
+    auto window = (Window *)GetPropW(hWnd, L"Window");
 
     switch (msg)
     {
@@ -109,7 +102,7 @@ LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             log_error("Window not found");
             return 0;
         }
-        window->width = (UINT)LOWORD(lParam);
+        window->width  = (UINT)LOWORD(lParam);
         window->height = (UINT)HIWORD(lParam);
         log_info("Window resized (%dx%d)", window->width, window->height);
     } return 0;
@@ -132,38 +125,38 @@ LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-void Native_Window::set_color_theme()
+void Native_Window::use_system_app_mode()
 {
     enum class WINDOWCOMPOSITIONATTRIB
     {
-        WCA_UNDEFINED = 0,
-        WCA_NCRENDERING_ENABLED = 1,
-        WCA_NCRENDERING_POLICY = 2,
-        WCA_TRANSITIONS_FORCEDISABLED = 3,
-        WCA_ALLOW_NCPAINT = 4,
-        WCA_CAPTION_BUTTON_BOUNDS = 5,
-        WCA_NONCLIENT_RTL_LAYOUT = 6,
-        WCA_FORCE_ICONIC_REPRESENTATION = 7,
-        WCA_EXTENDED_FRAME_BOUNDS = 8,
-        WCA_HAS_ICONIC_BITMAP = 9,
-        WCA_THEME_ATTRIBUTES = 10,
-        WCA_NCRENDERING_EXILED = 11,
-        WCA_NCADORNMENTINFO = 12,
-        WCA_EXCLUDED_FROM_LIVEPREVIEW = 13,
-        WCA_VIDEO_OVERLAY_ACTIVE = 14,
+        WCA_UNDEFINED                     = 0,
+        WCA_NCRENDERING_ENABLED           = 1,
+        WCA_NCRENDERING_POLICY            = 2,
+        WCA_TRANSITIONS_FORCEDISABLED     = 3,
+        WCA_ALLOW_NCPAINT                 = 4,
+        WCA_CAPTION_BUTTON_BOUNDS         = 5,
+        WCA_NONCLIENT_RTL_LAYOUT          = 6,
+        WCA_FORCE_ICONIC_REPRESENTATION   = 7,
+        WCA_EXTENDED_FRAME_BOUNDS         = 8,
+        WCA_HAS_ICONIC_BITMAP             = 9,
+        WCA_THEME_ATTRIBUTES              = 10,
+        WCA_NCRENDERING_EXILED            = 11,
+        WCA_NCADORNMENTINFO               = 12,
+        WCA_EXCLUDED_FROM_LIVEPREVIEW     = 13,
+        WCA_VIDEO_OVERLAY_ACTIVE          = 14,
         WCA_FORCE_ACTIVEWINDOW_APPEARANCE = 15,
-        WCA_DISALLOW_PEEK = 16,
-        WCA_CLOAK = 17,
-        WCA_CLOAKED = 18,
-        WCA_ACCENT_POLICY = 19,
-        WCA_FREEZE_REPRESENTATION = 20,
-        WCA_EVER_UNCLOAKED = 21,
-        WCA_VISUAL_OWNER = 22,
-        WCA_HOLOGRAPHIC = 23,
-        WCA_EXCLUDED_FROM_DDA = 24,
-        WCA_PASSIVEUPDATEMODE = 25,
-        WCA_USEDARKMODECOLORS = 26,
-        WCA_LAST = 27
+        WCA_DISALLOW_PEEK                 = 16,
+        WCA_CLOAK                         = 17,
+        WCA_CLOAKED                       = 18,
+        WCA_ACCENT_POLICY                 = 19,
+        WCA_FREEZE_REPRESENTATION         = 20,
+        WCA_EVER_UNCLOAKED                = 21,
+        WCA_VISUAL_OWNER                  = 22,
+        WCA_HOLOGRAPHIC                   = 23,
+        WCA_EXCLUDED_FROM_DDA             = 24,
+        WCA_PASSIVEUPDATEMODE             = 25,
+        WCA_USEDARKMODECOLORS             = 26,
+        WCA_LAST                          = 27
     };
 
     struct WINDOWCOMPOSITIONATTRIBDATA
@@ -190,7 +183,7 @@ void Native_Window::set_color_theme()
     this->huxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (this->huxtheme == 0)
     {
-        log_warn("can't load uxtheme.dll");
+        log_warn("Could not load uxtheme.dll");
         return;
     }
 
@@ -205,14 +198,14 @@ void Native_Window::set_color_theme()
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
     if (hUser32 == 0)
     {
-        log_warn("can't get module handle for user32.dll");
+        log_warn("Could not get module handle for user32.dll");
         return;
     }
 
     SetWindowCompositionAttribute = (fnSetWindowCompositionAttribute)(GetProcAddress(hUser32, "SetWindowCompositionAttribute"));
 
     BOOL dark = ShouldAppsUseDarkMode();
-    //log_info("color theme: {}", dark ? "Dark" : "Light");
+    log_info("System app mode: %s", dark ? "Dark" : "Light");
     SetPropW(this->hwnd, L"UseImmersiveDarkModeColors", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(dark)));
     AllowDarkModeForWindow(this->hwnd, true);
     SetPreferredAppMode(PreferredAppMode::AllowDark);

@@ -31,6 +31,6 @@
                     buffer);                                        \
     } while (0)
 
-#define log_info(...)  log(CONSOLE_COLOR_CYAN, "INFO", __VA_ARGS__)
-#define log_warn(...)  log(CONSOLE_COLOR_YELLOW, "WARN", __VA_ARGS__)
-#define log_error(...) log(CONSOLE_COLOR_RED, "ERROR", __VA_ARGS__)
+#define log_info(...)  log(CONSOLE_COLOR_CYAN,   "INFO",  __VA_ARGS__)
+#define log_warn(...)  log(CONSOLE_COLOR_YELLOW, "WARN",  __VA_ARGS__)
+#define log_error(...) log(CONSOLE_COLOR_RED,    "ERROR", __VA_ARGS__)
