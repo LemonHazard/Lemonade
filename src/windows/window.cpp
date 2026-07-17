@@ -104,7 +104,6 @@ LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         }
         window->width  = (UINT)LOWORD(lParam);
         window->height = (UINT)HIWORD(lParam);
-        log_info("Window resized (%dx%d)", window->width, window->height);
     } return 0;
     case WM_PAINT:
     {
