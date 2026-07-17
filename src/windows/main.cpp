@@ -25,6 +25,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     SetConsoleMode(hOut, mode);
 
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD inMode;
+    GetConsoleMode(hIn, &inMode);
+    inMode &= ~ENABLE_QUICK_EDIT_MODE;
+    inMode |= ENABLE_EXTENDED_FLAGS;
+    SetConsoleMode(hIn, inMode);
+
     int res = main(0, NULL);
 
     FreeConsole();
