@@ -118,7 +118,6 @@ LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         break;
     case WM_DESTROY:
         PostQuitMessage(0);
-        log_info("Window destroyed");
         return 0;
     }
 
