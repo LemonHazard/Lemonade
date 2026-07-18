@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdio>
+#include <string_view>
 
 #define CONSOLE_COLOR_RESET   "\x1b[0m"
 #define CONSOLE_COLOR_RED     "\x1b[31m"

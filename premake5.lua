@@ -35,7 +35,12 @@ project "Engine"
       links { "d3d11", "d3dcompiler", "dxgi", "imgui", "assimp" }
 
    filter "system:macosx"
+      cppdialect "C++20"
       defines { "OS_MACOS", "OS=\"MacOS\"" }
+      xcodebuildsettings {
+         ["GENERATE_INFOPLIST_FILE"] = "YES",
+         ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
+      }
 
    filter "system:linux"
       defines { "OS_LINUX", "OS=\"Linux\"" }
@@ -77,6 +82,22 @@ project "Engine_Spec"
       }
       libdirs {
          "modules/windows/catch2/lib",
+      }
+      links { "catch2main", "catch2" }
+
+   filter "system:macosx"
+      cppdialect "C++20"
+      defines { "OS_MACOS", "OS=\"MacOS\"" }
+      xcodebuildsettings {
+         ["GENERATE_INFOPLIST_FILE"] = "YES",
+         ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
+      }
+      includedirs {
+         "src",
+         "modules/common/catch2/include",
+      }
+      libdirs {
+         "modules/macos/catch2/lib",
       }
       links { "catch2main", "catch2" }
 

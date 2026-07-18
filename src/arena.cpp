@@ -55,7 +55,7 @@ Arena::Arena(u64 reserve_size, u64 initial_commit)
                            0);
 
     if (this->base == MAP_FAILED)
-        return false;
+//        return false;
 
     if (initial_commit)
     {
@@ -64,7 +64,7 @@ Arena::Arena(u64 reserve_size, u64 initial_commit)
                      PROT_READ | PROT_WRITE) != 0)
         {
             munmap(this->base, reserve_size);
-            return false;
+//            return false;
         }
     }
 #endif
