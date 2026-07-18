@@ -92,10 +92,17 @@ project "Engine_Spec"
          ["GENERATE_INFOPLIST_FILE"] = "YES",
          ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
       }
-      includedirs {
-         "src",
-         "modules/common/catch2/include",
+      xcodebuildsettings {
+        ["HEADER_SEARCH_PATHS"] = {
+            "$(inherited)",
+            "src",
+            "modules/common/catch2/include",
+        }
       }
+      -- includedirs {
+      --    "src",
+      --    "modules/common/catch2/include",
+      -- }
       libdirs {
          "modules/macos/catch2/lib",
       }
