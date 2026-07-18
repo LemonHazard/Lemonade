@@ -78,7 +78,7 @@ project "Engine_Spec"
       defines { "OS_WINDOWS", "OS=\"Windows\"" }
       includedirs {
          "src",
-         "modules/windows/catch2/include",
+         "modules/common/catch2/include",
       }
       libdirs {
          "modules/windows/catch2/lib",
@@ -128,7 +128,8 @@ newaction {
       os.rmdir("./build")
       os.rmdir("./.vs")
 
-      os.rmdir("./Lemonade.xcodeproj")
+      os.rmdir("./Engine.xcodeproj")
+      os.rmdir("./Engine_Spec.xcodeproj")
       os.rmdir("./Lemonade.xcworkspace")
       
       os.remove("*.sln")
