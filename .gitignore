@@ -6,3 +6,6 @@ imgui.ini
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
+*.pbxproj
+*.xcworkspacedata
+.DS_Store
