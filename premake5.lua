@@ -1,4 +1,5 @@
 local unity = dofile("tools/unity.lua")
+dofile("tools/vscode.lua")
 
 workspace "Lemonade"
    configurations { "Debug", "Release" }
@@ -166,6 +167,8 @@ newaction {
       os.remove("Makefile")
       os.remove("*.make")
       os.remove("compile_commands.json")
+      os.remove(".vscode/tasks.json")
+      os.remove(".vscode/launch.json")
       
       print("Clean complete!")
    end

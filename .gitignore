@@ -16,3 +16,4 @@ imgui.ini
 Makefile
 *.make
 compile_commands.json
+.vscode/
