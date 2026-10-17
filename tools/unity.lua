@@ -1,0 +1,243 @@
+-- Unity build gatherer.
+--
+-- Starting from root source files, follows project includes and writes one .cpp file
+-- that #includes every source the roots depend on:
+--   - only #include "..." is followed; #include <...> is system or third-party code;
+--   - a quoted include is resolved next to the including file, then in include dirs,
+--     and skipped if not found there (e.g. third-party headers from modules/);
+--   - for every visited file dir/name.ext the companion sources are pulled in:
+--     dir/name.cpp (for headers) and dir/<os>/name.cpp (for any file), so
+--     window.h brings in linux/window.cpp and main.cpp brings in linux/main.cpp;
+--   - #if/#ifdef are not evaluated, so platform files must stay wrapped in #ifdef OS_*.
+--
+-- Sources are emitted after the sources they depend on, and the output is only
+-- rewritten when its content changes, so an unchanged unity file isn't recompiled.
+--
+-- Usage from premake5.lua (inside a project, Linux only for now):
+--   unity.build {
+--       replaces     = { "src/**.cpp" },        -- project files no longer compiled directly
+--       roots        = { "src/main.cpp" },
+--       include_dirs = { "src" },               -- optional
+--       out          = "build/app_unity.cpp",
+--   }
+--
+-- Standalone:
+--   premake5 --file=tools/unity.lua --os=linux unity --roots=src/main.cpp --out=build/app_unity.cpp
+
+local unity = {}
+
+local os_dirs = { windows = "windows", linux = "linux", macosx = "macos" }
+
+local function parse_includes(source)
+    source = source:gsub("/%*.-%*/", "")
+
+    local includes = {}
+    for line in source:gmatch("[^\n]+") do
+        local name = line:match('^%s*#%s*include%s*"([^"]+)"')
+        if name then
+            table.insert(includes, name)
+        end
+    end
+    return includes
+end
+
+local function resolve(name, from_dir, include_dirs)
+    local candidate = path.join(from_dir, name)
+    if os.isfile(candidate) then
+        return path.getabsolute(candidate)
+    end
+
+    for _, dir in ipairs(include_dirs) do
+        candidate = path.join(dir, name)
+        if os.isfile(candidate) then
+            return path.getabsolute(candidate)
+        end
+    end
+
+    return nil
+end
+
+local function companions(file, os_dir)
+    local dir  = path.getdirectory(file)
+    local name = path.getbasename(file)
+    local ext  = path.getextension(file)
+
+    local list = {}
+    if ext == ".h" or ext == ".hpp" then
+        table.insert(list, path.join(dir, name .. ".cpp"))
+    end
+    table.insert(list, path.join(dir, os_dir, name .. ".cpp"))
+    return list
+end
+
+local function expand_roots(roots, base_dir)
+    local files = {}
+    for _, root in ipairs(roots) do
+        local pattern = path.getabsolute(root, base_dir)
+        if pattern:find("*", 1, true) then
+            local matches = os.matchfiles(pattern)
+            table.sort(matches)
+            for _, file in ipairs(matches) do
+                table.insert(files, path.getabsolute(file))
+            end
+        elseif os.isfile(pattern) then
+            table.insert(files, pattern)
+        else
+            error("unity: root file not found: " .. root, 0)
+        end
+    end
+    return files
+end
+
+-- Returns the list of gathered sources (absolute paths) in emission order.
+function unity.gather(roots, include_dirs, base_dir)
+    base_dir = base_dir or os.getcwd()
+
+    local os_dir = os_dirs[os.target()]
+    if not os_dir then
+        error("unity: unsupported target os: " .. tostring(os.target()), 0)
+    end
+
+    local dirs = {}
+    for _, dir in ipairs(include_dirs or {}) do
+        table.insert(dirs, path.getabsolute(dir, base_dir))
+    end
+
+    local visited = {}
+    local sources = {}
+
+    local function visit(file)
+        if visited[file] then return end
+        visited[file] = true
+
+        local source = io.readfile(file)
+        if not source then
+            error("unity: could not read " .. file, 0)
+        end
+
+        for _, name in ipairs(parse_includes(source)) do
+            local include = resolve(name, path.getdirectory(file), dirs)
+            if include then
+                visit(include)
+            end
+        end
+
+        for _, companion in ipairs(companions(file, os_dir)) do
+            if os.isfile(companion) then
+                visit(path.getabsolute(companion))
+            end
+        end
+
+        if path.getextension(file) == ".cpp" then
+            table.insert(sources, file)
+        end
+    end
+
+    for _, root in ipairs(expand_roots(roots, base_dir)) do
+        visit(root)
+    end
+
+    return sources
+end
+
+-- Writes the unity file; returns true if it was (re)written.
+function unity.generate(roots, include_dirs, out, base_dir)
+    base_dir = base_dir or os.getcwd()
+
+    local out_file = path.getabsolute(out, base_dir)
+    local out_dir  = path.getdirectory(out_file)
+    local sources  = unity.gather(roots, include_dirs, base_dir)
+
+    local lines = { "// Generated by tools/unity.lua, do not edit.", "" }
+    for _, source in ipairs(sources) do
+        table.insert(lines, '#include "' .. path.getrelative(out_dir, source) .. '"')
+    end
+    local content = table.concat(lines, "\n") .. "\n"
+
+    os.mkdir(out_dir)
+    local result = os.writefile_ifnotequal(content, out_file)
+    if result < 0 then
+        error("unity: could not write " .. out_file, 0)
+    end
+    if result > 0 then
+        print("unity: generated " .. path.getrelative(base_dir, out_file) .. " (" .. #sources .. " sources)")
+    end
+    return result > 0
+end
+
+-- Sets up the current project to build a single unity file: the files matching
+-- opts.replaces are removed from the build, the unity file is generated now (so it
+-- exists for make) and regenerated by a prebuild command, so new includes are picked
+-- up without re-running premake. Paths are relative to the main premake script.
+function unity.build(opts)
+    local base_dir     = _MAIN_SCRIPT_DIR
+    local include_dirs = opts.include_dirs or {}
+
+    -- premake applies removals after all additions, so the patterns
+    -- must not match opts.out
+    removefiles(opts.replaces)
+    files { opts.out }
+
+    local function quote(s) return '"' .. s .. '"' end
+    local function absolute(list)
+        local result = {}
+        for _, p in ipairs(list) do
+            table.insert(result, path.getabsolute(p, base_dir))
+        end
+        return table.concat(result, ",")
+    end
+
+    local command = "@" .. quote(_PREMAKE_COMMAND)
+        .. " --file=" .. quote(path.join(base_dir, "tools/unity.lua"))
+        .. " --os=" .. os.target()
+        .. " unity"
+        .. " --roots=" .. quote(absolute(opts.roots))
+        .. " --out=" .. quote(path.getabsolute(opts.out, base_dir))
+    if #include_dirs > 0 then
+        command = command .. " --include-dirs=" .. quote(absolute(include_dirs))
+    end
+    prebuildcommands { command }
+
+    if os.istarget("linux") and (_ACTION == "gmake" or _ACTION == "gmake2") then
+        unity.generate(opts.roots, include_dirs, opts.out, base_dir)
+    end
+end
+
+newoption {
+    trigger     = "roots",
+    value       = "FILES",
+    description = "unity: comma-separated root source files (globs allowed)",
+}
+
+newoption {
+    trigger     = "include-dirs",
+    value       = "DIRS",
+    description = "unity: comma-separated include dirs to resolve quoted includes",
+}
+
+newoption {
+    trigger     = "out",
+    value       = "FILE",
+    description = "unity: output unity source file",
+}
+
+newaction {
+    trigger     = "unity",
+    description = "Generate a unity build source file from the given roots",
+    execute     = function()
+        if not _OPTIONS["roots"] or not _OPTIONS["out"] then
+            error("unity: --roots and --out are required", 0)
+        end
+
+        local function split(s)
+            return s and s ~= "" and string.explode(s, ",") or {}
+        end
+
+        unity.generate(split(_OPTIONS["roots"]),
+                       split(_OPTIONS["include-dirs"]),
+                       _OPTIONS["out"],
+                       _WORKING_DIR)
+    end,
+}
+
+return unity

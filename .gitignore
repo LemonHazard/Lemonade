@@ -12,3 +12,6 @@ imgui.ini
 *.plist
 *.xcuserstate
 .DS_Store
+
+Makefile
+*.make

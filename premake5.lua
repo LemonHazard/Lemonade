@@ -1,3 +1,5 @@
+local unity = dofile("tools/unity.lua")
+
 workspace "Lemonade"
    configurations { "Debug", "Release" }
    architecture "x64"
@@ -43,6 +45,11 @@ project "Engine"
 
    filter "system:linux"
       defines { "OS_LINUX", "OS=\"Linux\"" }
+      unity.build {
+         replaces = { "src/**.cpp" },
+         roots    = { "src/main.cpp" },
+         out      = "build/app_unity.cpp",
+      }
 
    filter "configurations:Debug"
       defines { "DEBUG", "_DEBUG" }
@@ -106,6 +113,23 @@ project "Engine_Spec"
       }
       links { "catch2main", "catch2" }
 
+   filter "system:linux"
+      defines { "OS_LINUX", "OS=\"Linux\"" }
+      includedirs {
+         "src",
+         "modules/common/catch2/include",
+      }
+      libdirs {
+         "modules/linux/catch2/lib",
+      }
+      links { "catch2main", "catch2" }
+      unity.build {
+         replaces     = { "test/**.cpp" },
+         roots        = { "test/**.cpp" },
+         include_dirs = { "src" },
+         out          = "build/spec_unity.cpp",
+      }
+
    filter "configurations:Debug"
       defines { "DEBUG" }
       runtime "Release"
@@ -135,6 +159,7 @@ newaction {
       os.remove("*.vcxproj.filters")
       os.remove("*.vcxproj.user")
       os.remove("Makefile")
+      os.remove("*.make")
       
       print("Clean complete!")
    end
