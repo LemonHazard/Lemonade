@@ -163,8 +163,8 @@ bool Renderer::begin_frame(const Vector4 &clear_color)
 
     if (!n->ready) return false;
 
-    u32 width  = n->window->width;
-    u32 height = n->window->height;
+    u32 width  = n->window->framebuffer_width;
+    u32 height = n->window->framebuffer_height;
     if (width == 0 || height == 0) return false;
 
     if (!n->swapchain || n->swapchain_dirty ||

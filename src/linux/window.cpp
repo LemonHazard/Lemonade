@@ -14,6 +14,8 @@
 // (move, resize, close buttons) comes from libdecor, which also creates the
 // xdg-shell toplevel for us and draws the title bar with the GTK theme.
 
+static void native_window_scale_changed(Window *window);
+
 static const wl_registry_listener native_window_registry_listener = {
     .global        = Native_Window::registry_global,
     .global_remove = Native_Window::registry_global_remove,
@@ -27,6 +29,17 @@ static libdecor_frame_interface native_window_frame_interface = {
     .configure = Native_Window::frame_configure,
     .close     = Native_Window::frame_close,
     .commit    = Native_Window::frame_commit,
+};
+
+static const wl_surface_listener native_window_surface_listener = {
+    .enter                      = Native_Window::surface_enter,
+    .leave                      = Native_Window::surface_leave,
+    .preferred_buffer_scale     = Native_Window::surface_preferred_buffer_scale,
+    .preferred_buffer_transform = Native_Window::surface_preferred_buffer_transform,
+};
+
+static const wp_fractional_scale_v1_listener native_window_fractional_scale_listener = {
+    .preferred_scale = Native_Window::fractional_scale_preferred,
 };
 
 static str native_window_to_utf8(const wstr &text)
@@ -66,7 +79,8 @@ static str native_window_to_utf8(const wstr &text)
     return result;
 }
 
-Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(height), closed(false)
+Window::Window(const wstr &title, u32 width, u32 height)
+    : width(width), height(height), framebuffer_width(width), framebuffer_height(height), scale(1.0f), closed(false)
 {
     this->native = new Native_Window();
 
@@ -91,6 +105,16 @@ Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(
     }
 
     this->native->surface = wl_compositor_create_surface(this->native->compositor);
+    wl_surface_add_listener(this->native->surface, &native_window_surface_listener, this);
+
+    if (this->native->viewporter && this->native->fractional_scale_manager)
+    {
+        this->native->viewport = wp_viewporter_get_viewport(this->native->viewporter, this->native->surface);
+        this->native->fractional_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+            this->native->fractional_scale_manager, this->native->surface);
+        wp_fractional_scale_v1_add_listener(this->native->fractional_scale,
+                                            &native_window_fractional_scale_listener, this);
+    }
 
     this->native->decor = libdecor_new(this->native->display, &native_window_decor_interface);
     if (!this->native->decor)
@@ -123,6 +147,12 @@ Window::~Window()
     if (this->native->frame)      libdecor_frame_unref(this->native->frame);
     if (this->native->decor)      libdecor_unref(this->native->decor);
     if (this->native->buffer)     wl_buffer_destroy(this->native->buffer);
+
+    if (this->native->fractional_scale)         wp_fractional_scale_v1_destroy(this->native->fractional_scale);
+    if (this->native->viewport)                 wp_viewport_destroy(this->native->viewport);
+    if (this->native->fractional_scale_manager) wp_fractional_scale_manager_v1_destroy(this->native->fractional_scale_manager);
+    if (this->native->viewporter)               wp_viewporter_destroy(this->native->viewporter);
+
     if (this->native->surface)    wl_surface_destroy(this->native->surface);
     if (this->native->shm)        wl_shm_destroy(this->native->shm);
     if (this->native->compositor) wl_compositor_destroy(this->native->compositor);
@@ -169,12 +199,23 @@ void Native_Window::registry_global(void *data, wl_registry *registry, u32 name,
 
     if (strcmp(interface, wl_compositor_interface.name) == 0)
     {
-        u32 bind_version = version < 4 ? version : 4;
-        native->compositor = (wl_compositor *)wl_registry_bind(registry, name, &wl_compositor_interface, bind_version);
+        // Version 6 adds wl_surface.preferred_buffer_scale.
+        native->compositor_version = version < 6 ? version : 6;
+        native->compositor = (wl_compositor *)wl_registry_bind(registry, name, &wl_compositor_interface,
+                                                               native->compositor_version);
     }
     else if (strcmp(interface, wl_shm_interface.name) == 0)
     {
         native->shm = (wl_shm *)wl_registry_bind(registry, name, &wl_shm_interface, 1);
+    }
+    else if (strcmp(interface, wp_viewporter_interface.name) == 0)
+    {
+        native->viewporter = (wp_viewporter *)wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
+    }
+    else if (strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0)
+    {
+        native->fractional_scale_manager = (wp_fractional_scale_manager_v1 *)
+            wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1);
     }
 }
 
@@ -203,6 +244,7 @@ void Native_Window::frame_configure(libdecor_frame *frame, libdecor_configuratio
 
     window->width  = (u32)width;
     window->height = (u32)height;
+    window->native->apply_scale(window);
 
     libdecor_state *state = libdecor_state_new(width, height);
     libdecor_frame_commit(frame, state, configuration);
@@ -212,7 +254,7 @@ void Native_Window::frame_configure(libdecor_frame *frame, libdecor_configuratio
 
     if (!window->native->has_renderer)
     {
-        window->native->present_blank(window->width, window->height);
+        window->native->present_blank(window->framebuffer_width, window->framebuffer_height);
     }
 }
 
@@ -226,6 +268,80 @@ void Native_Window::frame_commit(libdecor_frame *, void *data)
 {
     auto window = (Window *)data;
     wl_surface_commit(window->native->surface);
+}
+
+void Native_Window::surface_enter(void *, wl_surface *, wl_output *)
+{
+}
+
+void Native_Window::surface_leave(void *, wl_surface *, wl_output *)
+{
+}
+
+void Native_Window::surface_preferred_buffer_scale(void *data, wl_surface *, i32 factor)
+{
+    auto window = (Window *)data;
+    if (factor < 1 || factor == window->native->buffer_scale) return;
+
+    window->native->buffer_scale = factor;
+    native_window_scale_changed(window);
+}
+
+void Native_Window::surface_preferred_buffer_transform(void *, wl_surface *, u32)
+{
+}
+
+void Native_Window::fractional_scale_preferred(void *data, wp_fractional_scale_v1 *, u32 scale)
+{
+    auto window = (Window *)data;
+    if (scale == 0 || scale == window->native->scale_120) return;
+
+    window->native->scale_120 = scale;
+    native_window_scale_changed(window);
+}
+
+// Updates the window's scale and pixel size from its logical size and the preferred
+// scale, and tells the compositor how the buffer maps to the surface. The new state
+// takes effect with the next buffer. Returns whether the pixel size changed.
+bool Native_Window::apply_scale(Window *window)
+{
+    u32 old_width  = window->framebuffer_width;
+    u32 old_height = window->framebuffer_height;
+
+    if (this->viewport && this->scale_120)
+    {
+        // Fractional: render at the exact pixel size and let the viewport map the
+        // buffer onto the logical size. Rounding is half away from zero, as the
+        // protocol specifies.
+        window->scale              = (r32)this->scale_120 / 120.0f;
+        window->framebuffer_width  = (window->width  * this->scale_120 + 60) / 120;
+        window->framebuffer_height = (window->height * this->scale_120 + 60) / 120;
+        wp_viewport_set_destination(this->viewport, (i32)window->width, (i32)window->height);
+    }
+    else
+    {
+        // Integer: the buffer is buffer_scale times the logical size.
+        window->scale              = (r32)this->buffer_scale;
+        window->framebuffer_width  = window->width  * (u32)this->buffer_scale;
+        window->framebuffer_height = window->height * (u32)this->buffer_scale;
+        if (this->compositor_version >= 3)
+        {
+            wl_surface_set_buffer_scale(this->surface, this->buffer_scale);
+        }
+    }
+
+    return window->framebuffer_width != old_width || window->framebuffer_height != old_height;
+}
+
+// A scale change outside of a configure: the renderer picks up the new size on its
+// next frame, without a renderer the blank buffer has to be replaced here.
+static void native_window_scale_changed(Window *window)
+{
+    bool resized = window->native->apply_scale(window);
+    if (resized && window->native->configured && !window->native->has_renderer)
+    {
+        window->native->present_blank(window->framebuffer_width, window->framebuffer_height);
+    }
 }
 
 // libdecor's GTK plugin draws the title bar with GTK3, which ignores the desktop's

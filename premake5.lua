@@ -52,9 +52,11 @@ project "Engine"
       -- Link the runtime libraries by soname, so the -dev packages aren't needed
       links { ":libwayland-client.so.0", ":libdecor-0.so.0", ":libvulkan.so.1" }
       unity.build {
-         replaces = { "src/**.cpp" },
-         roots    = { "src/main.cpp" },
-         out      = "build/app_unity.cpp",
+         replaces     = { "src/**.cpp" },
+         roots        = { "src/main.cpp" },
+         -- modules whose sources are compiled into the unity build (include/ + src/)
+         include_dirs = { "modules/linux/*/include" },
+         out          = "build/app_unity.cpp",
       }
       -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
       files { "src/shaders/*.vert", "src/shaders/*.frag" }

@@ -25,7 +25,8 @@ public:
     HMODULE     huxtheme;
 };
 
-Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(height), closed(false)
+Window::Window(const wstr &title, u32 width, u32 height)
+    : width(width), height(height), framebuffer_width(width), framebuffer_height(height), scale(1.0f), closed(false)
 {
     this->native = new Native_Window();
     this->native->wndclass.cbSize        = sizeof(WNDCLASSEXW);
@@ -56,6 +57,10 @@ Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(
                                        nullptr);
 
     SetPropW(this->native->hwnd, L"Window", (HANDLE)this);
+
+    // The process is per-monitor DPI aware (dpiawareness in premake5.lua), so sizes
+    // are in pixels; the scale is only for sizing content like UI.
+    this->scale = (r32)GetDpiForWindow(this->native->hwnd) / USER_DEFAULT_SCREEN_DPI;
 
     this->native->use_system_app_mode();
 
@@ -108,7 +113,16 @@ LRESULT WINAPI Native_Window::wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         }
         window->width  = (UINT)LOWORD(lParam);
         window->height = (UINT)HIWORD(lParam);
+        window->framebuffer_width  = window->width;
+        window->framebuffer_height = window->height;
     } return 0;
+    case WM_DPICHANGED:
+    {
+        if (window)
+        {
+            window->scale = (r32)HIWORD(wParam) / USER_DEFAULT_SCREEN_DPI;
+        }
+    } break;
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
