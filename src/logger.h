@@ -14,7 +14,7 @@
 #define log_msg(log_color, log_level, ...)                          \
     do                                                              \
     {                                                               \
-        char buffer[256];                                           \
+        char buffer[2048];                                          \
         std::snprintf(buffer, sizeof(buffer), __VA_ARGS__);         \
         std::string_view file_name{__FILE__};                       \
         auto pos = file_name.find_last_of("\\/");                   \

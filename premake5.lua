@@ -50,12 +50,23 @@ project "Engine"
          "modules/linux/*/include",
       }
       -- Link the runtime libraries by soname, so the -dev packages aren't needed
-      links { ":libwayland-client.so.0", ":libdecor-0.so.0" }
+      links { ":libwayland-client.so.0", ":libdecor-0.so.0", ":libvulkan.so.1" }
       unity.build {
          replaces = { "src/**.cpp" },
          roots    = { "src/main.cpp" },
          out      = "build/app_unity.cpp",
       }
+      -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
+      files { "src/shaders/*.vert", "src/shaders/*.frag" }
+      includedirs { "build/shaders" }
+
+   filter { "system:linux", "files:src/shaders/*" }
+      buildmessage "%{file.name}"
+      buildcommands {
+         '{MKDIR} "build/shaders"',
+         'glslc --target-env=vulkan1.3 -mfmt=c -o "build/shaders/%{file.name}.inc" "%{file.relpath}"',
+      }
+      buildoutputs { "build/shaders/%{file.name}.inc" }
 
    filter "configurations:Debug"
       defines { "DEBUG", "_DEBUG" }

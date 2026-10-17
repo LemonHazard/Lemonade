@@ -8,36 +8,11 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include <libdecor.h>
-#include <wayland-client.h>
+#include "window.h"
 
 // Wayland window. GNOME doesn't draw server-side decorations, so the title bar
 // (move, resize, close buttons) comes from libdecor, which also creates the
 // xdg-shell toplevel for us and draws the title bar with the GTK theme.
-
-class Native_Window
-{
-public:
-    static void registry_global(void *data, wl_registry *registry, u32 name, const char *interface, u32 version);
-    static void registry_global_remove(void *data, wl_registry *registry, u32 name);
-
-    static void decor_error(libdecor *context, libdecor_error error, const char *message);
-    static void frame_configure(libdecor_frame *frame, libdecor_configuration *configuration, void *data);
-    static void frame_close(libdecor_frame *frame, void *data);
-    static void frame_commit(libdecor_frame *frame, void *data);
-
-    void use_system_app_mode();
-    bool present_blank(u32 width, u32 height);
-
-    wl_display     *display    = nullptr;
-    wl_registry    *registry   = nullptr;
-    wl_compositor  *compositor = nullptr;
-    wl_shm         *shm        = nullptr;
-    wl_surface     *surface    = nullptr;
-    wl_buffer      *buffer     = nullptr;
-    libdecor       *decor      = nullptr;
-    libdecor_frame *frame      = nullptr;
-};
 
 static const wl_registry_listener native_window_registry_listener = {
     .global        = Native_Window::registry_global,
@@ -162,6 +137,17 @@ void Window::show()
     if (!this->native->frame) return;
 
     libdecor_frame_map(this->native->frame);
+
+    // Wait for the first configure, so the window has its size and the renderer
+    // may present to it right after show() returns.
+    while (!this->native->configured && !this->closed)
+    {
+        if (libdecor_dispatch(this->native->decor, -1) < 0)
+        {
+            log_error("Lost connection to the Wayland display");
+            this->closed = true;
+        }
+    }
 }
 
 void Window::read_input()
@@ -222,7 +208,12 @@ void Native_Window::frame_configure(libdecor_frame *frame, libdecor_configuratio
     libdecor_frame_commit(frame, state, configuration);
     libdecor_state_free(state);
 
-    window->native->present_blank(window->width, window->height);
+    window->native->configured = true;
+
+    if (!window->native->has_renderer)
+    {
+        window->native->present_blank(window->width, window->height);
+    }
 }
 
 void Native_Window::frame_close(libdecor_frame *, void *data)
