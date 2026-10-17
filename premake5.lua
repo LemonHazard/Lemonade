@@ -45,6 +45,10 @@ project "Engine"
 
    filter "system:linux"
       defines { "OS_LINUX", "OS=\"Linux\"" }
+      includedirs {
+         "/usr/include/libdecor-0",
+      }
+      links { "wayland-client", "decor-0" }
       unity.build {
          replaces = { "src/**.cpp" },
          roots    = { "src/main.cpp" },
