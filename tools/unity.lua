@@ -274,6 +274,18 @@ premake.override(premake.main, "postAction", function(base)
     base()
 end)
 
+-- Sources may #include files produced by custom build commands (e.g. SPIR-V
+-- compiled from shaders). premake's makefiles only order those before linking, so
+-- `make -j` could compile the unity file first; make objects wait for them too.
+if premake.modules.gmake and premake.modules.gmake.cpp then
+    premake.override(premake.modules.gmake.cpp, "customDeps", function(base, cfg, toolset)
+        base(cfg, toolset)
+        if cfg._gmake.filesets["CUSTOM"] then
+            _p('$(OBJECTS): | $(CUSTOM)')
+        end
+    end)
+end
+
 newoption {
     trigger     = "roots",
     value       = "FILES",
