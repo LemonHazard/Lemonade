@@ -11,6 +11,8 @@
 #define CONSOLE_COLOR_MAGENTA "\x1b[35m"
 #define CONSOLE_COLOR_CYAN    "\x1b[36m"
 
+#define LOG_LOCATION_WIDTH 24
+
 #define log_msg(log_color, log_level, ...)                          \
     do                                                              \
     {                                                               \
@@ -22,13 +24,17 @@
         {                                                           \
             file_name = file_name.substr(pos + 1);                  \
         }                                                           \
-        std::printf(" %.*s:%d\t%s%s%s\t%s\n",                       \
-                    static_cast<int>(file_name.size()),             \
-                    file_name.data(),                               \
-                    __LINE__,                                       \
+        char location[256];                                         \
+        std::snprintf(location, sizeof(location), "%.*s:%d",        \
+                      static_cast<int>(file_name.size()),           \
+                      file_name.data(),                             \
+                      __LINE__);                                    \
+        std::printf(" %s%-5s%s  %-*s %s\n",                         \
                     log_color,                                      \
                     log_level,                                      \
                     CONSOLE_COLOR_RESET,                            \
+                    LOG_LOCATION_WIDTH,                             \
+                    location,                                       \
                     buffer);                                        \
     } while (0)
 
