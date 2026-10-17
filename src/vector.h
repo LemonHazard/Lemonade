@@ -29,11 +29,6 @@ struct Vector3 {
             float g;
             float b;
         };
-        struct {
-            float p;
-            float y;
-            float r;
-        };
         Vector2 xy;
     };
 
@@ -42,7 +37,7 @@ struct Vector3 {
     }
 
     operator const float*() const {
-        return &x; 
+        return &x;
     }
 };
 
@@ -70,5 +65,28 @@ struct Vector4 {
 
     operator const float*() const {
         return &x; 
+    }
+};
+
+struct Rotation3 {
+    union {
+        struct {
+            float pitch;
+            float yaw;
+            float roll;
+        };
+        struct {
+            float p;
+            float y;
+            float r;
+        };
+    };
+
+    const float& operator[](size_t index) const {
+        return (&pitch)[index];
+    }
+
+    operator const float*() const {
+        return &pitch;
     }
 };
