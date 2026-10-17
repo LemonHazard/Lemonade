@@ -9,6 +9,7 @@ project "Engine"
    kind "WindowedApp"
    dpiawareness "HighPerMonitor"
    language "C++"
+   cppdialect "C++20"
    objdir ("obj/" .. outputdir)
    targetdir ("build/" .. outputdir)
 
@@ -22,7 +23,6 @@ project "Engine"
    enableunitybuild "On"
 
    filter "system:windows"
-      cppdialect "C++20"
       buildoptions{"/utf-8"}
       defines { "OS_WINDOWS", "OS=\"Windows\"" }
       includedirs {
@@ -35,7 +35,6 @@ project "Engine"
       links { "d3d11", "d3dcompiler", "dxgi", "imgui", "assimp" }
 
    filter "system:macosx"
-      cppdialect "C++20"
       defines { "OS_MACOS", "OS=\"MacOS\"" }
       xcodebuildsettings {
          ["GENERATE_INFOPLIST_FILE"] = "YES",
@@ -58,6 +57,7 @@ project "Engine_Spec"
    kind "ConsoleApp"
    dpiawareness "HighPerMonitor"
    language "C++"
+   cppdialect "C++20"
    objdir ("obj/" .. outputdir)
    targetdir ("build/" .. outputdir)
    debugdir "."
@@ -73,7 +73,6 @@ project "Engine_Spec"
    enableunitybuild "On"
 
    filter "system:windows"
-      cppdialect "C++20"
       buildoptions{"/utf-8"}
       defines { "OS_WINDOWS", "OS=\"Windows\"" }
       includedirs {
@@ -86,7 +85,6 @@ project "Engine_Spec"
       links { "catch2main", "catch2" }
 
    filter "system:macosx"
-      cppdialect "C++20"
       defines { "OS_MACOS", "OS=\"MacOS\"" }
       xcodebuildsettings {
          ["GENERATE_INFOPLIST_FILE"] = "YES",
