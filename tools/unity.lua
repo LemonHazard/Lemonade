@@ -26,6 +26,13 @@
 
 local unity = {}
 
+-- This script's own path, for the prebuild command: in a game the engine (and this
+-- script) usually lives in a subfolder, not next to the main premake script.
+local UNITY_SCRIPT = _SCRIPT
+
+-- Unity files generated in this run: absolute output path -> gathered sources.
+unity.generated = {}
+
 local os_dirs = { windows = "windows", linux = "linux", macosx = "macos" }
 
 local function parse_includes(source)
@@ -154,6 +161,8 @@ function unity.generate(roots, include_dirs, out, base_dir)
     end
     local content = table.concat(lines, "\n") .. "\n"
 
+    unity.generated[out_file] = sources
+
     os.mkdir(out_dir)
     local result = os.writefile_ifnotequal(content, out_file)
     if result < 0 then
@@ -188,7 +197,7 @@ function unity.build(opts)
     end
 
     local command = "@" .. quote(_PREMAKE_COMMAND)
-        .. " --file=" .. quote(path.join(base_dir, "tools/unity.lua"))
+        .. " --file=" .. quote(UNITY_SCRIPT)
         .. " --os=" .. os.target()
         .. " unity"
         .. " --roots=" .. quote(absolute(opts.roots))
@@ -202,6 +211,68 @@ function unity.build(opts)
         unity.generate(opts.roots, include_dirs, opts.out, base_dir)
     end
 end
+
+-- Editors (VSCode's C/C++ extension, clangd) need compile flags for every source,
+-- but the compiler only ever sees the unity file. Write a compile_commands.json with
+-- one entry per gathered source, using the flags of the project's Debug config.
+function unity.write_compile_commands(file_path)
+    local gcc = premake.tools.gcc
+
+    local entries = {}
+    for wks in premake.global.eachWorkspace() do
+        for prj in premake.workspace.eachproject(wks) do
+            local cfg = premake.project.getconfig(prj, "Debug")
+            for _, file in ipairs(cfg and cfg.files or {}) do
+                local sources = unity.generated[file]
+                if sources then
+                    local flags = table.join({ gcc.gettoolname(cfg, "cxx") },
+                                             gcc.getcxxflags(cfg),
+                                             gcc.getdefines(cfg.defines, cfg),
+                                             gcc.getincludedirs(cfg, cfg.includedirs, cfg.externalincludedirs,
+                                                                cfg.frameworkdirs, cfg.includedirsafter),
+                                             gcc.getforceincludes(cfg),
+                                             cfg.buildoptions)
+                    local command = table.concat(flags, " ")
+
+                    for _, source in ipairs(sources) do
+                        table.insert(entries, {
+                            directory = prj.location,
+                            file      = source,
+                            command   = command .. " -c " .. path.getrelative(prj.location, source),
+                        })
+                    end
+                end
+            end
+        end
+    end
+
+    if #entries == 0 then return end
+
+    local function quote(s)
+        return '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"'
+    end
+
+    local lines = {}
+    for i, entry in ipairs(entries) do
+        table.insert(lines, "  {\n"
+            .. '    "directory": ' .. quote(entry.directory) .. ",\n"
+            .. '    "file": '      .. quote(entry.file)      .. ",\n"
+            .. '    "command": '   .. quote(entry.command)   .. "\n"
+            .. "  }" .. (i < #entries and "," or ""))
+    end
+    local content = "[\n" .. table.concat(lines, "\n") .. "\n]\n"
+
+    if os.writefile_ifnotequal(content, file_path) > 0 then
+        print("unity: generated " .. path.getrelative(_MAIN_SCRIPT_DIR, file_path) .. " (" .. #entries .. " entries)")
+    end
+end
+
+premake.override(premake.main, "postAction", function(base)
+    if os.istarget("linux") and (_ACTION == "gmake" or _ACTION == "gmake2") then
+        unity.write_compile_commands(path.join(_MAIN_SCRIPT_DIR, "compile_commands.json"))
+    end
+    base()
+end)
 
 newoption {
     trigger     = "roots",

@@ -165,6 +165,7 @@ newaction {
       os.remove("*.vcxproj.user")
       os.remove("Makefile")
       os.remove("*.make")
+      os.remove("compile_commands.json")
       
       print("Clean complete!")
    end
