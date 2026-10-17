@@ -27,7 +27,7 @@ project "Engine"
 
    filter "system:windows"
       buildoptions{"/utf-8"}
-      defines { "OS_WINDOWS", "OS=\"Windows\"" }
+      defines { "OS_WINDOWS", "OS_NAME=\"Windows\"" }
       includedirs {
          "modules/windows/*/include",
       }
@@ -38,14 +38,14 @@ project "Engine"
       links { "d3d11", "d3dcompiler", "dxgi", "imgui", "assimp" }
 
    filter "system:macosx"
-      defines { "OS_MACOS", "OS=\"MacOS\"" }
+      defines { "OS_MACOS", "OS_NAME=\"MacOS\"" }
       xcodebuildsettings {
          ["GENERATE_INFOPLIST_FILE"] = "YES",
          ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
       }
 
    filter "system:linux"
-      defines { "OS_LINUX", "OS=\"Linux\"" }
+      defines { "OS_LINUX", "OS_NAME=\"Linux\"" }
       includedirs {
          "modules/linux/*/include",
       }
@@ -87,7 +87,7 @@ project "Engine_Spec"
 
    filter "system:windows"
       buildoptions{"/utf-8"}
-      defines { "OS_WINDOWS", "OS=\"Windows\"" }
+      defines { "OS_WINDOWS", "OS_NAME=\"Windows\"" }
       includedirs {
          "src",
          "modules/common/catch2/include",
@@ -98,7 +98,7 @@ project "Engine_Spec"
       links { "catch2main", "catch2" }
 
    filter "system:macosx"
-      defines { "OS_MACOS", "OS=\"MacOS\"" }
+      defines { "OS_MACOS", "OS_NAME=\"MacOS\"" }
       xcodebuildsettings {
          ["GENERATE_INFOPLIST_FILE"] = "YES",
          ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
@@ -120,7 +120,7 @@ project "Engine_Spec"
       links { "catch2main", "catch2" }
 
    filter "system:linux"
-      defines { "OS_LINUX", "OS=\"Linux\"" }
+      defines { "OS_LINUX", "OS_NAME=\"Linux\"" }
       includedirs {
          "src",
          "modules/common/catch2/include",

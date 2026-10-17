@@ -5,7 +5,7 @@
 
 int main(int, char**)
 {
-    log_info("Fresh Lemonade on %s!", OS);
+    log_info("Fresh Lemonade on %s!", OS_NAME);
 
     Window window(L"Lemonade", 1920, 1080);
     window.show();
