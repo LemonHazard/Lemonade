@@ -69,7 +69,7 @@ project "Engine"
          "modules/linux/*/include",
       }
       -- Link the runtime libraries by soname, so the -dev packages aren't needed
-      links { ":libwayland-client.so.0", ":libdecor-0.so.0" }
+      links { ":libwayland-client.so.0", ":libwayland-cursor.so.0", ":libdecor-0.so.0" }
       unity.build {
          replaces      = { "src/**.cpp" },
          roots         = { "src/main.cpp" },

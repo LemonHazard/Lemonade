@@ -3,10 +3,12 @@
 #include "../window.h"
 #include "../logger.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <linux/input-event-codes.h>
 
 #include "window.h"
 
@@ -41,6 +43,178 @@ static const wl_surface_listener native_window_surface_listener = {
 static const wp_fractional_scale_v1_listener native_window_fractional_scale_listener = {
     .preferred_scale = Native_Window::fractional_scale_preferred,
 };
+
+static const wl_seat_listener native_window_seat_listener = {
+    .capabilities = Native_Window::seat_capabilities,
+    .name         = Native_Window::seat_name,
+};
+
+static const wl_keyboard_listener native_window_keyboard_listener = {
+    .keymap      = Native_Window::keyboard_keymap,
+    .enter       = Native_Window::keyboard_enter,
+    .leave       = Native_Window::keyboard_leave,
+    .key         = Native_Window::keyboard_key,
+    .modifiers   = Native_Window::keyboard_modifiers,
+    .repeat_info = Native_Window::keyboard_repeat_info,
+};
+
+static const wl_pointer_listener native_window_pointer_listener = {
+    .enter         = Native_Window::pointer_enter,
+    .leave         = Native_Window::pointer_leave,
+    .motion        = Native_Window::pointer_motion,
+    .button        = Native_Window::pointer_button,
+    .axis          = Native_Window::pointer_axis,
+    .frame         = Native_Window::pointer_frame,
+    .axis_source   = Native_Window::pointer_axis_source,
+    .axis_stop     = Native_Window::pointer_axis_stop,
+    .axis_discrete = Native_Window::pointer_axis_discrete,
+    .axis_value120 = Native_Window::pointer_axis_value120,
+};
+
+// Wayland reports keys as Linux evdev scancodes: physical positions, independent of
+// the keyboard layout.
+static Key native_window_key_from_scancode(u32 scancode)
+{
+    switch (scancode)
+    {
+    case KEY_TAB:        return Key::Tab;
+    case KEY_LEFT:       return Key::LeftArrow;
+    case KEY_RIGHT:      return Key::RightArrow;
+    case KEY_UP:         return Key::UpArrow;
+    case KEY_DOWN:       return Key::DownArrow;
+    case KEY_PAGEUP:     return Key::PageUp;
+    case KEY_PAGEDOWN:   return Key::PageDown;
+    case KEY_HOME:       return Key::Home;
+    case KEY_END:        return Key::End;
+    case KEY_INSERT:     return Key::Insert;
+    case KEY_DELETE:     return Key::Delete;
+    case KEY_BACKSPACE:  return Key::Backspace;
+    case KEY_SPACE:      return Key::Space;
+    case KEY_ENTER:      return Key::Enter;
+    case KEY_ESC:        return Key::Escape;
+    case KEY_LEFTCTRL:   return Key::LeftCtrl;
+    case KEY_LEFTSHIFT:  return Key::LeftShift;
+    case KEY_LEFTALT:    return Key::LeftAlt;
+    case KEY_LEFTMETA:   return Key::LeftSuper;
+    case KEY_RIGHTCTRL:  return Key::RightCtrl;
+    case KEY_RIGHTSHIFT: return Key::RightShift;
+    case KEY_RIGHTALT:   return Key::RightAlt;
+    case KEY_RIGHTMETA:  return Key::RightSuper;
+    case KEY_COMPOSE:    return Key::Menu;
+    case KEY_0:          return Key::Num0;
+    case KEY_1:          return Key::Num1;
+    case KEY_2:          return Key::Num2;
+    case KEY_3:          return Key::Num3;
+    case KEY_4:          return Key::Num4;
+    case KEY_5:          return Key::Num5;
+    case KEY_6:          return Key::Num6;
+    case KEY_7:          return Key::Num7;
+    case KEY_8:          return Key::Num8;
+    case KEY_9:          return Key::Num9;
+    case KEY_A:          return Key::A;
+    case KEY_B:          return Key::B;
+    case KEY_C:          return Key::C;
+    case KEY_D:          return Key::D;
+    case KEY_E:          return Key::E;
+    case KEY_F:          return Key::F;
+    case KEY_G:          return Key::G;
+    case KEY_H:          return Key::H;
+    case KEY_I:          return Key::I;
+    case KEY_J:          return Key::J;
+    case KEY_K:          return Key::K;
+    case KEY_L:          return Key::L;
+    case KEY_M:          return Key::M;
+    case KEY_N:          return Key::N;
+    case KEY_O:          return Key::O;
+    case KEY_P:          return Key::P;
+    case KEY_Q:          return Key::Q;
+    case KEY_R:          return Key::R;
+    case KEY_S:          return Key::S;
+    case KEY_T:          return Key::T;
+    case KEY_U:          return Key::U;
+    case KEY_V:          return Key::V;
+    case KEY_W:          return Key::W;
+    case KEY_X:          return Key::X;
+    case KEY_Y:          return Key::Y;
+    case KEY_Z:          return Key::Z;
+    case KEY_F1:         return Key::F1;
+    case KEY_F2:         return Key::F2;
+    case KEY_F3:         return Key::F3;
+    case KEY_F4:         return Key::F4;
+    case KEY_F5:         return Key::F5;
+    case KEY_F6:         return Key::F6;
+    case KEY_F7:         return Key::F7;
+    case KEY_F8:         return Key::F8;
+    case KEY_F9:         return Key::F9;
+    case KEY_F10:        return Key::F10;
+    case KEY_F11:        return Key::F11;
+    case KEY_F12:        return Key::F12;
+    case KEY_F13:        return Key::F13;
+    case KEY_F14:        return Key::F14;
+    case KEY_F15:        return Key::F15;
+    case KEY_F16:        return Key::F16;
+    case KEY_F17:        return Key::F17;
+    case KEY_F18:        return Key::F18;
+    case KEY_F19:        return Key::F19;
+    case KEY_F20:        return Key::F20;
+    case KEY_F21:        return Key::F21;
+    case KEY_F22:        return Key::F22;
+    case KEY_F23:        return Key::F23;
+    case KEY_F24:        return Key::F24;
+    case KEY_APOSTROPHE: return Key::Apostrophe;
+    case KEY_COMMA:      return Key::Comma;
+    case KEY_MINUS:      return Key::Minus;
+    case KEY_DOT:        return Key::Period;
+    case KEY_SLASH:      return Key::Slash;
+    case KEY_SEMICOLON:  return Key::Semicolon;
+    case KEY_EQUAL:      return Key::Equal;
+    case KEY_LEFTBRACE:  return Key::LeftBracket;
+    case KEY_BACKSLASH:  return Key::Backslash;
+    case KEY_RIGHTBRACE: return Key::RightBracket;
+    case KEY_GRAVE:      return Key::GraveAccent;
+    case KEY_CAPSLOCK:   return Key::CapsLock;
+    case KEY_SCROLLLOCK: return Key::ScrollLock;
+    case KEY_NUMLOCK:    return Key::NumLock;
+    case KEY_SYSRQ:      return Key::PrintScreen;
+    case KEY_PAUSE:      return Key::Pause;
+    case KEY_KP0:        return Key::Keypad0;
+    case KEY_KP1:        return Key::Keypad1;
+    case KEY_KP2:        return Key::Keypad2;
+    case KEY_KP3:        return Key::Keypad3;
+    case KEY_KP4:        return Key::Keypad4;
+    case KEY_KP5:        return Key::Keypad5;
+    case KEY_KP6:        return Key::Keypad6;
+    case KEY_KP7:        return Key::Keypad7;
+    case KEY_KP8:        return Key::Keypad8;
+    case KEY_KP9:        return Key::Keypad9;
+    case KEY_KPDOT:      return Key::KeypadDecimal;
+    case KEY_KPSLASH:    return Key::KeypadDivide;
+    case KEY_KPASTERISK: return Key::KeypadMultiply;
+    case KEY_KPMINUS:    return Key::KeypadSubtract;
+    case KEY_KPPLUS:     return Key::KeypadAdd;
+    case KEY_KPENTER:    return Key::KeypadEnter;
+    case KEY_KPEQUAL:    return Key::KeypadEqual;
+    case KEY_BACK:       return Key::AppBack;
+    case KEY_FORWARD:    return Key::AppForward;
+    case KEY_102ND:      return Key::Oem102;
+    default:             return Key::None;
+    }
+}
+
+static Key native_window_key_from_button(u32 button)
+{
+    switch (button)
+    {
+    case BTN_LEFT:   return Key::MouseLeft;
+    case BTN_RIGHT:  return Key::MouseRight;
+    case BTN_MIDDLE: return Key::MouseMiddle;
+    case BTN_SIDE:   return Key::MouseX1;
+    case BTN_EXTRA:  return Key::MouseX2;
+    case BTN_BACK:   return Key::MouseX1;
+    case BTN_FORWARD:return Key::MouseX2;
+    default:         return Key::None;
+    }
+}
 
 static str native_window_to_utf8(const wstr &text)
 {
@@ -83,6 +257,7 @@ Window::Window(const wstr &title, u32 width, u32 height)
     : width(width), height(height), framebuffer_width(width), framebuffer_height(height), scale(1.0f), closed(false)
 {
     this->native = new Native_Window();
+    this->native->window = this;
 
     // On any failure the window is reported as closed, so the main loop exits.
     this->native->display = wl_display_connect(nullptr);
@@ -144,6 +319,24 @@ Window::Window(const wstr &title, u32 width, u32 height)
 
 Window::~Window()
 {
+    if (this->native->cursor_surface) wl_surface_destroy(this->native->cursor_surface);
+    if (this->native->cursor_theme)   wl_cursor_theme_destroy(this->native->cursor_theme);
+    if (this->native->keyboard)
+    {
+        if (this->native->seat_version >= WL_KEYBOARD_RELEASE_SINCE_VERSION) wl_keyboard_release(this->native->keyboard);
+        else wl_keyboard_destroy(this->native->keyboard);
+    }
+    if (this->native->pointer)
+    {
+        if (this->native->seat_version >= WL_POINTER_RELEASE_SINCE_VERSION) wl_pointer_release(this->native->pointer);
+        else wl_pointer_destroy(this->native->pointer);
+    }
+    if (this->native->seat)
+    {
+        if (this->native->seat_version >= WL_SEAT_RELEASE_SINCE_VERSION) wl_seat_release(this->native->seat);
+        else wl_seat_destroy(this->native->seat);
+    }
+
     if (this->native->frame)      libdecor_frame_unref(this->native->frame);
     if (this->native->decor)      libdecor_unref(this->native->decor);
     if (this->native->buffer)     wl_buffer_destroy(this->native->buffer);
@@ -182,6 +375,8 @@ void Window::show()
 
 void Window::read_input()
 {
+    this->input_state.begin_frame();
+
     if (!this->native->decor) return;
 
     // Non-blocking: send our requests, then dispatch whatever events have arrived.
@@ -216,6 +411,13 @@ void Native_Window::registry_global(void *data, wl_registry *registry, u32 name,
     {
         native->fractional_scale_manager = (wp_fractional_scale_manager_v1 *)
             wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1);
+    }
+    else if (strcmp(interface, wl_seat_interface.name) == 0 && !native->seat)
+    {
+        // Version 8 adds wl_pointer.axis_value120 (scroll in wheel notches).
+        native->seat_version = version < 8 ? version : 8;
+        native->seat = (wl_seat *)wl_registry_bind(registry, name, &wl_seat_interface, native->seat_version);
+        wl_seat_add_listener(native->seat, &native_window_seat_listener, native);
     }
 }
 
@@ -342,6 +544,239 @@ static void native_window_scale_changed(Window *window)
     {
         window->native->present_blank(window->framebuffer_width, window->framebuffer_height);
     }
+
+    window->native->update_cursor();
+}
+
+void Native_Window::seat_capabilities(void *data, wl_seat *seat, u32 capabilities)
+{
+    auto native = (Native_Window *)data;
+
+    bool has_keyboard = capabilities & WL_SEAT_CAPABILITY_KEYBOARD;
+    if (has_keyboard && !native->keyboard)
+    {
+        native->keyboard = wl_seat_get_keyboard(seat);
+        wl_keyboard_add_listener(native->keyboard, &native_window_keyboard_listener, native);
+    }
+    else if (!has_keyboard && native->keyboard)
+    {
+        if (native->seat_version >= WL_KEYBOARD_RELEASE_SINCE_VERSION) wl_keyboard_release(native->keyboard);
+        else wl_keyboard_destroy(native->keyboard);
+        native->keyboard = nullptr;
+        native->window->input_state.release_keyboard();
+    }
+
+    bool has_pointer = capabilities & WL_SEAT_CAPABILITY_POINTER;
+    if (has_pointer && !native->pointer)
+    {
+        native->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(native->pointer, &native_window_pointer_listener, native);
+    }
+    else if (!has_pointer && native->pointer)
+    {
+        if (native->seat_version >= WL_POINTER_RELEASE_SINCE_VERSION) wl_pointer_release(native->pointer);
+        else wl_pointer_destroy(native->pointer);
+        native->pointer            = nullptr;
+        native->pointer_on_surface = false;
+        native->window->input_state.mouse_inside = false;
+        native->window->input_state.release_mouse_buttons();
+    }
+}
+
+void Native_Window::seat_name(void *, wl_seat *, const char *)
+{
+}
+
+// Keys are mapped from scancodes, so the layout (keymap) isn't needed until there is
+// text input.
+void Native_Window::keyboard_keymap(void *, wl_keyboard *, u32, i32 fd, u32)
+{
+    close(fd);
+}
+
+void Native_Window::keyboard_enter(void *, wl_keyboard *, u32, wl_surface *, wl_array *)
+{
+    // Keys already held when the window gets focus are ignored: they were pressed
+    // for another window.
+}
+
+void Native_Window::keyboard_leave(void *data, wl_keyboard *, u32, wl_surface *)
+{
+    // No release events come after losing focus, so nothing stays stuck down.
+    auto native = (Native_Window *)data;
+    native->window->input_state.release_keyboard();
+}
+
+void Native_Window::keyboard_key(void *data, wl_keyboard *, u32, u32, u32 key, u32 state)
+{
+    auto native = (Native_Window *)data;
+    native->window->input_state.set_key(native_window_key_from_scancode(key),
+                                        state == WL_KEYBOARD_KEY_STATE_PRESSED);
+}
+
+void Native_Window::keyboard_modifiers(void *, wl_keyboard *, u32, u32, u32, u32, u32)
+{
+    // Modifier keys also arrive as key events.
+}
+
+void Native_Window::keyboard_repeat_info(void *, wl_keyboard *, i32, i32)
+{
+}
+
+void Native_Window::pointer_enter(void *data, wl_pointer *, u32 serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
+{
+    auto native = (Native_Window *)data;
+
+    // The pointer also enters libdecor's title bar and borders, which are separate
+    // surfaces: only the window content counts as inside.
+    if (surface != native->surface) return;
+
+    native->pointer_serial     = serial;
+    native->pointer_on_surface = true;
+
+    Input_State &input = native->window->input_state;
+    input.mouse_inside = true;
+    input.mouse_x      = (r32)wl_fixed_to_double(x);
+    input.mouse_y      = (r32)wl_fixed_to_double(y);
+
+    native->update_cursor();
+}
+
+void Native_Window::pointer_leave(void *data, wl_pointer *, u32, wl_surface *surface)
+{
+    auto native = (Native_Window *)data;
+    if (surface != native->surface) return;
+
+    native->pointer_on_surface = false;
+    native->window->input_state.mouse_inside = false;
+    native->window->input_state.release_mouse_buttons();
+}
+
+void Native_Window::pointer_motion(void *data, wl_pointer *, u32, wl_fixed_t x, wl_fixed_t y)
+{
+    auto native = (Native_Window *)data;
+    if (!native->pointer_on_surface) return;
+
+    native->window->input_state.mouse_x = (r32)wl_fixed_to_double(x);
+    native->window->input_state.mouse_y = (r32)wl_fixed_to_double(y);
+}
+
+void Native_Window::pointer_button(void *data, wl_pointer *, u32, u32, u32 button, u32 state)
+{
+    auto native = (Native_Window *)data;
+    if (!native->pointer_on_surface) return;
+
+    native->window->input_state.set_key(native_window_key_from_button(button),
+                                        state == WL_POINTER_BUTTON_STATE_PRESSED);
+}
+
+void Native_Window::pointer_axis(void *data, wl_pointer *, u32, u32 axis, wl_fixed_t value)
+{
+    auto native = (Native_Window *)data;
+    if (axis > 1) return;
+
+    native->frame_scroll[axis] += (r32)wl_fixed_to_double(value);
+}
+
+void Native_Window::pointer_axis_value120(void *data, wl_pointer *, u32 axis, i32 value120)
+{
+    auto native = (Native_Window *)data;
+    if (axis > 1) return;
+
+    native->frame_value120[axis]    += value120;
+    native->frame_has_value120[axis] = true;
+}
+
+void Native_Window::pointer_frame(void *data, wl_pointer *)
+{
+    auto native = (Native_Window *)data;
+
+    if (native->pointer_on_surface)
+    {
+        // Wayland's +vertical is down, Input's is up. Continuous scroll is in surface
+        // units; about 10 of them make a wheel notch.
+        r32 notches[2];
+        for (u32 axis = 0; axis < 2; ++axis)
+        {
+            notches[axis] = native->frame_has_value120[axis] ? (r32)native->frame_value120[axis] / 120.0f
+                                                             : native->frame_scroll[axis] / 10.0f;
+        }
+
+        Input_State &input = native->window->input_state;
+        input.scroll_y -= notches[WL_POINTER_AXIS_VERTICAL_SCROLL];
+        input.scroll_x += notches[WL_POINTER_AXIS_HORIZONTAL_SCROLL];
+    }
+
+    for (u32 axis = 0; axis < 2; ++axis)
+    {
+        native->frame_scroll[axis]       = 0.0f;
+        native->frame_value120[axis]     = 0;
+        native->frame_has_value120[axis] = false;
+    }
+}
+
+void Native_Window::pointer_axis_source(void *, wl_pointer *, u32)
+{
+}
+
+void Native_Window::pointer_axis_stop(void *, wl_pointer *, u32, u32)
+{
+}
+
+void Native_Window::pointer_axis_discrete(void *, wl_pointer *, u32, i32)
+{
+    // Replaced by axis_value120 in the seat version we bind.
+}
+
+// Wayland has no default cursor: the window sets one whenever the pointer enters it,
+// otherwise the last one (e.g. a resize arrow from the border) stays. The theme is
+// loaded at the window's integer buffer scale so the cursor is sharp.
+void Native_Window::update_cursor()
+{
+    if (!this->pointer || !this->pointer_on_surface || !this->shm) return;
+
+    i32 scale = this->buffer_scale;
+    if (this->scale_120)
+    {
+        i32 fractional_ceil = (i32)((this->scale_120 + 119) / 120);
+        if (fractional_ceil > scale) scale = fractional_ceil;
+    }
+    if (scale < 1) scale = 1;
+
+    if (!this->cursor_theme || this->cursor_theme_scale != scale)
+    {
+        if (this->cursor_theme) wl_cursor_theme_destroy(this->cursor_theme);
+
+        const char *theme_name = getenv("XCURSOR_THEME");
+        const char *size_text  = getenv("XCURSOR_SIZE");
+        int size = size_text ? atoi(size_text) : 0;
+        if (size <= 0) size = 24;
+
+        this->cursor_theme       = wl_cursor_theme_load(theme_name, size * scale, this->shm);
+        this->cursor_theme_scale = scale;
+        if (!this->cursor_theme)
+        {
+            log_warn("Could not load the cursor theme");
+            return;
+        }
+    }
+
+    wl_cursor *cursor = wl_cursor_theme_get_cursor(this->cursor_theme, "default");
+    if (!cursor) cursor = wl_cursor_theme_get_cursor(this->cursor_theme, "left_ptr");
+    if (!cursor || cursor->image_count == 0) return;
+
+    wl_cursor_image *image  = cursor->images[0];
+    wl_buffer       *buffer = wl_cursor_image_get_buffer(image);
+    if (!buffer) return;
+
+    if (!this->cursor_surface) this->cursor_surface = wl_compositor_create_surface(this->compositor);
+
+    wl_pointer_set_cursor(this->pointer, this->pointer_serial, this->cursor_surface,
+                          (i32)image->hotspot_x / scale, (i32)image->hotspot_y / scale);
+    wl_surface_set_buffer_scale(this->cursor_surface, scale);
+    wl_surface_attach(this->cursor_surface, buffer, 0, 0);
+    wl_surface_damage_buffer(this->cursor_surface, 0, 0, (i32)image->width, (i32)image->height);
+    wl_surface_commit(this->cursor_surface);
 }
 
 // libdecor's GTK plugin draws the title bar with GTK3, which ignores the desktop's

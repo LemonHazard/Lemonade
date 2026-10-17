@@ -1,0 +1,20 @@
+#
+# Action bindings: an action name followed by up to 4 keys or mouse buttons.
+# Key names are listed in src/input.h (case doesn't matter).
+#
+
+#---------------------------------------
+# Controls
+#---------------------------------------
+
+MoveForward         W UpArrow
+MoveBackward        S DownArrow
+MoveLeft            A LeftArrow
+MoveRight           D RightArrow
+Jump                Space MouseRight
+
+#---------------------------------------
+# UI
+#---------------------------------------
+
+Quit                Escape

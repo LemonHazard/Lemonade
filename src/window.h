@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core.h"
+#include "input.h"
 
 class Native_Window;
 
@@ -23,6 +24,10 @@ public:
     // Content scale of the display the window is on, e.g. 1.25 at 125%.
     r32  scale;
     bool closed;
+
+    // Keyboard and mouse input since the previous read_input(); pass it to
+    // Input::update() each frame.
+    Input_State input_state = {};
 
     Native_Window *native;
 };

@@ -1,6 +1,8 @@
 #include "core.h"
 #include "vector.h"
 #include "window.h"
+#include "input.h"
+#include "key_value_file.h"
 #include "renderer.h"
 #include "logger.h"
 
@@ -12,12 +14,19 @@ int main(int, char**)
     Renderer renderer(window);
     window.show();
 
+    Input input;
+    input.use_bindings(Key_Value_File::read("key_bindings.kvl"));
+
     // Linear color: on an sRGB swapchain 0.0037 displays as #0C0C0C.
     const Vector4 clear_color = { 0.0037f, 0.0037f, 0.0037f, 1.0f };
 
     while (!window.closed)
     {
         window.read_input();
+        input.update(window.input_state);
+
+        if (input.was_pressed("Quit")) window.closed = true;
+        if (input.was_pressed("Jump")) log_info("Jump at (%.0f, %.0f)", input.mouse_x, input.mouse_y);
 
         if (renderer.begin_frame(clear_color))
         {
