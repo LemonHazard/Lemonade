@@ -1,6 +1,23 @@
 local unity = dofile("tools/unity.lua")
 dofile("tools/vscode.lua")
 
+-- Rendering backend, chosen at build time: each one lives in src/<renderer>/ and is
+-- compiled in with RENDERER_<NAME> defined.
+newoption {
+   trigger     = "renderer",
+   value       = "API",
+   description = "Rendering backend (default: vulkan on Linux, null elsewhere)",
+   allowed     = {
+      { "vulkan", "Vulkan (Linux)" },
+      { "null",   "Draws nothing" },
+   },
+}
+
+local renderer = _OPTIONS["renderer"] or (os.istarget("linux") and "vulkan" or "null")
+if renderer == "vulkan" and not os.istarget("linux") then
+   error("The Vulkan renderer is only supported on Linux for now", 0)
+end
+
 workspace "Lemonade"
    configurations { "Debug", "Release" }
    architecture "x64"
@@ -22,6 +39,8 @@ project "Engine"
       "src/**.hpp",
       "src/**.cpp"
    }
+
+   defines { "RENDERER_" .. renderer:upper() }
 
    enableunitybuild "On"
 
@@ -50,25 +69,32 @@ project "Engine"
          "modules/linux/*/include",
       }
       -- Link the runtime libraries by soname, so the -dev packages aren't needed
-      links { ":libwayland-client.so.0", ":libdecor-0.so.0", ":libvulkan.so.1" }
+      links { ":libwayland-client.so.0", ":libdecor-0.so.0" }
       unity.build {
-         replaces     = { "src/**.cpp" },
-         roots        = { "src/main.cpp" },
+         replaces      = { "src/**.cpp" },
+         roots         = { "src/main.cpp" },
          -- modules whose sources are compiled into the unity build (include/ + src/)
-         include_dirs = { "modules/linux/*/include" },
-         out          = "build/app_unity.cpp",
+         include_dirs  = { "modules/linux/*/include" },
+         -- companion sources come from src/linux/ and the renderer's src/<renderer>/
+         platform_dirs = { "linux", renderer },
+         out           = "build/app_unity.cpp",
       }
-      -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
-      files { "src/shaders/*.vert", "src/shaders/*.frag" }
-      includedirs { "build/shaders" }
 
-   filter { "system:linux", "files:src/shaders/*" }
-      buildmessage "%{file.name}"
-      buildcommands {
-         '{MKDIR} "build/shaders"',
-         'glslc --target-env=vulkan1.3 -mfmt=c -o "build/shaders/%{file.name}.inc" "%{file.relpath}"',
-      }
-      buildoutputs { "build/shaders/%{file.name}.inc" }
+   if renderer == "vulkan" then
+      filter "system:linux"
+         links { ":libvulkan.so.1" }
+         -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
+         files { "src/vulkan/shaders/*.vert", "src/vulkan/shaders/*.frag" }
+         includedirs { "build/shaders" }
+
+      filter { "system:linux", "files:src/vulkan/shaders/*" }
+         buildmessage "%{file.name}"
+         buildcommands {
+            '{MKDIR} "build/shaders"',
+            'glslc --target-env=vulkan1.3 -mfmt=c -o "build/shaders/%{file.name}.inc" "%{file.relpath}"',
+         }
+         buildoutputs { "build/shaders/%{file.name}.inc" }
+   end
 
    filter "configurations:Debug"
       defines { "DEBUG", "_DEBUG" }

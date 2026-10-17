@@ -1,20 +1,19 @@
-#ifdef OS_LINUX
+#ifdef RENDERER_VULKAN
 
 #include "../renderer.h"
 #include "../window.h"
 #include "../logger.h"
-#include "window.h"
+#include "surface.h"
 
 #include <cstring>
 #include <vector>
 
-#define VK_USE_PLATFORM_WAYLAND_KHR
 #include <vulkan/vulkan.h>
 
 // Vulkan 1.3 renderer: dynamic rendering (no render passes or framebuffers) and
 // synchronization2. Presents with FIFO, i.e. vsync.
 
-// SPIR-V compiled from src/shaders by glslc at build time (see premake5.lua).
+// SPIR-V compiled from vulkan/shaders by glslc at build time (see premake5.lua).
 static const u32 triangle_vert_spv[] =
 #include "triangle.vert.inc"
 ;
@@ -42,7 +41,6 @@ public:
                                                          void *user_data);
 
     bool create_instance();
-    bool create_surface(Native_Window *native_window);
     bool pick_physical_device();
     bool create_device();
     bool create_frames();
@@ -100,7 +98,7 @@ Renderer::Renderer(Window &window)
     // On any failure the renderer stays not ready: begin_frame() returns false and
     // the window keeps showing its own blank buffer.
     bool ok = this->native->create_instance()
-           && this->native->create_surface(window.native)
+           && create_vulkan_surface(this->native->instance, window, &this->native->surface)
            && this->native->pick_physical_device()
            && this->native->create_device()
            && this->native->create_frames()
@@ -113,7 +111,7 @@ Renderer::Renderer(Window &window)
     }
 
     this->native->ready = true;
-    window.native->has_renderer = true;
+    set_vulkan_presenting(window, true);
 }
 
 Renderer::~Renderer()
@@ -151,7 +149,7 @@ Renderer::~Renderer()
 
     if (n->instance) vkDestroyInstance(n->instance, nullptr);
 
-    if (n->window && n->window->native) n->window->native->has_renderer = false;
+    if (n->ready) set_vulkan_presenting(*n->window, false);
 
     delete n;
 }
@@ -364,7 +362,7 @@ bool Native_Renderer::create_instance()
 {
     const char *extensions[3] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
-        VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+        vulkan_surface_extension(),
     };
     u32 extension_count = 2;
 
@@ -438,17 +436,6 @@ bool Native_Renderer::create_instance()
     }
 
     return true;
-}
-
-bool Native_Renderer::create_surface(Native_Window *native_window)
-{
-    VkWaylandSurfaceCreateInfoKHR info = {
-        .sType   = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
-        .display = native_window->display,
-        .surface = native_window->surface,
-    };
-    return vk_check(vkCreateWaylandSurfaceKHR(this->instance, &info, nullptr, &this->surface),
-                    "vkCreateWaylandSurfaceKHR");
 }
 
 bool Native_Renderer::pick_physical_device()
@@ -827,4 +814,4 @@ void Native_Renderer::destroy_swapchain_resources()
     this->image_count = 0;
 }
 
-#endif // OS_LINUX
+#endif // RENDERER_VULKAN

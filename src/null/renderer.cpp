@@ -1,9 +1,10 @@
-#ifdef OS_WINDOWS
+#ifdef RENDERER_NULL
 
 #include "../renderer.h"
 #include "../logger.h"
 
-// Placeholder until the DirectX 11 renderer: nothing is drawn.
+// Renderer that draws nothing: the default where no backend is implemented yet
+// (Windows, macOS), and usable for headless runs.
 
 class Native_Renderer
 {
@@ -12,7 +13,7 @@ class Native_Renderer
 Renderer::Renderer(Window &)
 {
     this->native = new Native_Renderer();
-    log_warn("Renderer is not implemented on Windows yet");
+    log_warn("Null renderer: nothing is drawn");
 }
 
 Renderer::~Renderer()
@@ -33,4 +34,4 @@ void Renderer::end_frame()
 {
 }
 
-#endif // OS_WINDOWS
+#endif // RENDERER_NULL
