@@ -57,6 +57,7 @@ struct Vector4 {
         };
         Vector2 xy;
         Vector3 xyz;
+        Vector3 rgb;
     };
     
     const float& operator[](size_t index) const {
