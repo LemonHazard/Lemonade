@@ -99,6 +99,23 @@ local function generate_command(wks)
     if script ~= "premake5.lua" then
         command = command .. ' --file="' .. script .. '"'
     end
+
+    -- Repeat the options premake was run with (e.g. --renderer), so regenerating
+    -- from VSCode keeps the same configuration.
+    local names = {}
+    for name in pairs(_OPTIONS) do
+        if name ~= "file" then table.insert(names, name) end
+    end
+    table.sort(names)
+    for _, name in ipairs(names) do
+        local value = _OPTIONS[name]
+        if value == nil or value == "" then
+            command = command .. " --" .. name
+        else
+            command = command .. ' --' .. name .. '="' .. value .. '"'
+        end
+    end
+
     return command
 end
 
