@@ -46,9 +46,10 @@ project "Engine"
    filter "system:linux"
       defines { "OS_LINUX", "OS=\"Linux\"" }
       includedirs {
-         "/usr/include/libdecor-0",
+         "modules/linux/*/include",
       }
-      links { "wayland-client", "decor-0" }
+      -- Link the runtime libraries by soname, so the -dev packages aren't needed
+      links { ":libwayland-client.so.0", ":libdecor-0.so.0" }
       unity.build {
          replaces = { "src/**.cpp" },
          roots    = { "src/main.cpp" },
