@@ -3,11 +3,13 @@
 -- Starting from root source files, follows project includes and writes one .cpp file
 -- that #includes every source the roots depend on:
 --   - only #include "..." is followed; #include <...> is system or third-party code;
---   - a quoted include is resolved next to the including file, then in include dirs,
---     and skipped if not found there (e.g. third-party headers from modules/);
+--   - a quoted include is resolved next to the including file, then in include dirs
+--     (globs allowed), and skipped if not found there;
 --   - for every visited file dir/name.ext the companion sources are pulled in:
 --     dir/name.cpp (for headers) and dir/<os>/name.cpp (for any file), so
 --     window.h brings in linux/window.cpp and main.cpp brings in linux/main.cpp;
+--   - headers in an include/ dir also pull in the same path under src/, the usual
+--     library layout: modules/<lib>/include/name.h brings in modules/<lib>/src/name.cpp;
 --   - #if/#ifdef are not evaluated, so platform files must stay wrapped in #ifdef OS_*.
 --
 -- Sources are emitted after the sources they depend on, and the output is only
@@ -72,6 +74,12 @@ local function companions(file, os_dir)
     local list = {}
     if ext == ".h" or ext == ".hpp" then
         table.insert(list, path.join(dir, name .. ".cpp"))
+
+        -- The last include/ component in the path is replaced by src/.
+        local head, tail = dir:match("^(.*)/include(/?.*)$")
+        if head then
+            table.insert(list, path.join(head .. "/src" .. tail, name .. ".cpp"))
+        end
     end
     table.insert(list, path.join(dir, os_dir, name .. ".cpp"))
     return list
@@ -107,7 +115,16 @@ function unity.gather(roots, include_dirs, base_dir)
 
     local dirs = {}
     for _, dir in ipairs(include_dirs or {}) do
-        table.insert(dirs, path.getabsolute(dir, base_dir))
+        local pattern = path.getabsolute(dir, base_dir)
+        if pattern:find("*", 1, true) then
+            local matches = os.matchdirs(pattern)
+            table.sort(matches)
+            for _, match in ipairs(matches) do
+                table.insert(dirs, path.getabsolute(match))
+            end
+        else
+            table.insert(dirs, pattern)
+        end
     end
 
     local visited = {}
