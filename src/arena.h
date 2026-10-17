@@ -13,6 +13,7 @@ public:
     template<typename T>
     T* push(u64 count = 1);
 
+    bool is_valid() const;
     void reset();
 
 private:

@@ -11,11 +11,11 @@
 #define CONSOLE_COLOR_MAGENTA "\x1b[35m"
 #define CONSOLE_COLOR_CYAN    "\x1b[36m"
 
-#define log(log_color, log_level, format, ...)                      \
+#define log_msg(log_color, log_level, ...)                          \
     do                                                              \
     {                                                               \
         char buffer[256];                                           \
-        std::snprintf(buffer, sizeof(buffer), format, __VA_ARGS__); \
+        std::snprintf(buffer, sizeof(buffer), __VA_ARGS__);         \
         std::string_view file_name{__FILE__};                       \
         auto pos = file_name.find_last_of("\\/");                   \
         if (pos != std::string_view::npos)                          \
@@ -32,6 +32,6 @@
                     buffer);                                        \
     } while (0)
 
-#define log_info(...)  log(CONSOLE_COLOR_CYAN,   "INFO",  __VA_ARGS__)
-#define log_warn(...)  log(CONSOLE_COLOR_YELLOW, "WARN",  __VA_ARGS__)
-#define log_error(...) log(CONSOLE_COLOR_RED,    "ERROR", __VA_ARGS__)
+#define log_info(...)  log_msg(CONSOLE_COLOR_CYAN,   "INFO",  __VA_ARGS__)
+#define log_warn(...)  log_msg(CONSOLE_COLOR_YELLOW, "WARN",  __VA_ARGS__)
+#define log_error(...) log_msg(CONSOLE_COLOR_RED,    "ERROR", __VA_ARGS__)

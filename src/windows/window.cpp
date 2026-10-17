@@ -7,6 +7,10 @@
 #include <cstdlib>
 #include <windows.h>
 
+// The class name is an identifier, not the title. wndclass.lpszClassName is read again by
+// UnregisterClassW in the destructor, so it must point to storage that outlives the window.
+static const wchar_t *WINDOW_CLASS_NAME = L"Lemonade_Window";
+
 class Native_Window
 {
 public:
@@ -34,7 +38,7 @@ Window::Window(const wstr &title, u32 width, u32 height) : width(width), height(
     this->native->wndclass.hCursor       = nullptr;
     this->native->wndclass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     this->native->wndclass.lpszMenuName  = nullptr;
-    this->native->wndclass.lpszClassName = title.c_str();
+    this->native->wndclass.lpszClassName = WINDOW_CLASS_NAME;
     this->native->wndclass.hIconSm       = nullptr;
 
     RegisterClassExW(&this->native->wndclass);

@@ -1,4 +1,5 @@
 #include "arena.h"
+#include "logger.h"
 
 #include <cassert>
 
@@ -12,68 +13,86 @@
 
 Arena::Arena(u64 reserve_size, u64 initial_commit)
 {
+    // A constructor can't report failure, so on any error the arena is left
+    // empty (base == nullptr): is_valid() returns false and push() returns nullptr.
+
     this->page_size = this->get_page_size();
 
     reserve_size   = this->align_up(reserve_size, this->page_size);
     initial_commit = this->align_up(initial_commit, this->page_size);
 
-    if (initial_commit > reserve_size)
+    if (reserve_size == 0 || initial_commit > reserve_size)
     {
-        // return false;
+        log_error("Arena: invalid sizes (reserve %llu, initial commit %llu)",
+                  (unsigned long long)reserve_size,
+                  (unsigned long long)initial_commit);
+        return;
     }
 
 #ifdef OS_WINDOWS
-    this->base = (u8*)VirtualAlloc(nullptr,
+    u8 *memory = (u8*)VirtualAlloc(nullptr,
                                    reserve_size,
                                    MEM_RESERVE,
                                    PAGE_READWRITE);
 
-    if (!this->base)
+    if (!memory)
     {
-        // return false;
+        log_error("Arena: failed to reserve %llu bytes", (unsigned long long)reserve_size);
+        return;
     }
 
     if (initial_commit)
     {
-        void* result = VirtualAlloc(this->base,
+        void* result = VirtualAlloc(memory,
                                     initial_commit,
                                     MEM_COMMIT,
                                     PAGE_READWRITE);
 
         if (!result)
         {
-            VirtualFree(this->base, 0, MEM_RELEASE);
-            // return false;
+            log_error("Arena: failed to commit %llu bytes", (unsigned long long)initial_commit);
+            VirtualFree(memory, 0, MEM_RELEASE);
+            return;
         }
     }
 #else
-    this->base = (u8*)mmap(nullptr,
-                           reserve_size,
-                           PROT_NONE,
-                           MAP_PRIVATE | MAP_ANONYMOUS,
-                           -1,
-                           0);
+    void *mapping = mmap(nullptr,
+                         reserve_size,
+                         PROT_NONE,
+                         MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1,
+                         0);
 
-    if (this->base == MAP_FAILED)
-//        return false;
+    if (mapping == MAP_FAILED)
+    {
+        log_error("Arena: failed to reserve %llu bytes", (unsigned long long)reserve_size);
+        return;
+    }
+
+    u8 *memory = (u8*)mapping;
 
     if (initial_commit)
     {
-        if (mprotect(this->base,
+        if (mprotect(memory,
                      initial_commit,
                      PROT_READ | PROT_WRITE) != 0)
         {
-            munmap(this->base, reserve_size);
-//            return false;
+            log_error("Arena: failed to commit %llu bytes", (unsigned long long)initial_commit);
+            munmap(memory, reserve_size);
+            return;
         }
     }
 #endif
 
+    this->base      = memory;
     this->reserved  = reserve_size;
     this->committed = initial_commit;
     this->used      = 0;
+}
 
-    // return true;
+bool Arena::is_valid() const
+{
+    return this->base != nullptr;
 }
 
 Arena::~Arena()
@@ -118,6 +137,9 @@ u64 Arena::align_up(u64 value, u64 alignment)
 
 bool Arena::commit(u64 required)
 {
+    if (!this->base)
+        return false;
+
     if (required <= this->committed)
         return true;
 
