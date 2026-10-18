@@ -1,108 +1,13 @@
-local unity = dofile("tools/unity.lua")
-dofile("tools/vscode.lua")
-
--- Rendering backend, chosen at build time: each one lives in src/<renderer>/ and is
--- compiled in with RENDERER_<NAME> defined.
-newoption {
-   trigger     = "renderer",
-   value       = "API",
-   description = "Rendering backend (default: vulkan on Linux, null elsewhere)",
-   allowed     = {
-      { "vulkan", "Vulkan (Linux)" },
-      { "null",   "Draws nothing" },
-   },
-}
-
-local renderer = _OPTIONS["renderer"] or (os.istarget("linux") and "vulkan" or "null")
-if renderer == "vulkan" and not os.istarget("linux") then
-   error("The Vulkan renderer is only supported on Linux for now", 0)
-end
+local lemonade = dofile("lemonade.lua")
+local unity    = lemonade.unity
 
 workspace "Lemonade"
    configurations { "Debug", "Release" }
    architecture "x64"
+   startproject "Engine"
 
-outputdir = "%{cfg.buildcfg}-%{cfg.system}-%{cfg.architecture}"
-
-project "Engine"
-   location "."
-   kind "WindowedApp"
-   dpiawareness "HighPerMonitor"
-   language "C++"
-   cppdialect "C++20"
-   objdir ("obj/" .. outputdir)
-   targetdir ("build/" .. outputdir)
-
-   files
-   {
-      "src/**.h",
-      "src/**.hpp",
-      "src/**.cpp"
-   }
-
-   defines { "RENDERER_" .. renderer:upper() }
-
-   enableunitybuild "On"
-
-   filter "system:windows"
-      buildoptions{"/utf-8"}
-      defines { "OS_WINDOWS", "OS_NAME=\"Windows\"" }
-      includedirs {
-         "modules/windows/*/include",
-      }
-      libdirs {
-         "modules/windows/*/lib",
-         "$(DXSDK_DIR)/Lib/x64",
-      }
-      links { "d3d11", "d3dcompiler", "dxgi", "imgui", "assimp" }
-
-   filter "system:macosx"
-      defines { "OS_MACOS", "OS_NAME=\"MacOS\"" }
-      xcodebuildsettings {
-         ["GENERATE_INFOPLIST_FILE"] = "YES",
-         ["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
-      }
-
-   filter "system:linux"
-      defines { "OS_LINUX", "OS_NAME=\"Linux\"" }
-      includedirs {
-         "modules/linux/*/include",
-      }
-      -- Link the runtime libraries by soname, so the -dev packages aren't needed
-      links { ":libwayland-client.so.0", ":libwayland-cursor.so.0", ":libdecor-0.so.0" }
-      unity.build {
-         replaces      = { "src/**.cpp" },
-         roots         = { "src/main.cpp" },
-         -- modules whose sources are compiled into the unity build (include/ + src/)
-         include_dirs  = { "modules/linux/*/include" },
-         -- companion sources come from src/linux/ and the renderer's src/<renderer>/
-         platform_dirs = { "linux", renderer },
-         out           = "build/app_unity.cpp",
-      }
-
-   if renderer == "vulkan" then
-      filter "system:linux"
-         links { ":libvulkan.so.1" }
-         -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
-         files { "src/vulkan/shaders/*.vert", "src/vulkan/shaders/*.frag" }
-         includedirs { "modules/common/vulkan/include", "build/shaders" }
-
-      filter { "system:linux", "files:src/vulkan/shaders/*" }
-         buildmessage "%{file.name}"
-         buildcommands {
-            '{MKDIR} "build/shaders"',
-            'glslc --target-env=vulkan1.3 -mfmt=c -o "build/shaders/%{file.name}.inc" "%{file.relpath}"',
-         }
-         buildoutputs { "build/shaders/%{file.name}.inc" }
-   end
-
-   filter "configurations:Debug"
-      defines { "DEBUG", "_DEBUG" }
-      symbols "On"
-
-   filter "configurations:Release"
-      defines { "NDEBUG", "_RELEASE", "RELEASE" }
-      optimize "On"
+lemonade.engine { name = "Engine", game = "Sandbox", title = "Lemonade" }
+lemonade.game   { name = "Sandbox", dir = "sandbox", roots = { "sandbox/sandbox.cpp" } }
 
 project "Engine_Spec"
    location "."
@@ -184,31 +89,3 @@ project "Engine_Spec"
    filter "configurations:Release"
       defines { "NDEBUG", "_RELEASE", "RELEASE" }
       optimize "On"
-
-newaction {
-   trigger     = "clean",
-   description = "Removes all generated project, solution, and binary files",
-   execute = function ()
-      print("Cleaning generated files...")
-      
-      os.rmdir("./obj")
-      os.rmdir("./build")
-      os.rmdir("./.vs")
-
-      os.rmdir("./Engine.xcodeproj")
-      os.rmdir("./Engine_Spec.xcodeproj")
-      os.rmdir("./Lemonade.xcworkspace")
-      
-      os.remove("*.sln")
-      os.remove("*.vcxproj")
-      os.remove("*.vcxproj.filters")
-      os.remove("*.vcxproj.user")
-      os.remove("Makefile")
-      os.remove("*.make")
-      os.remove("compile_commands.json")
-      os.remove(".vscode/tasks.json")
-      os.remove(".vscode/launch.json")
-      
-      print("Clean complete!")
-   end
-}
