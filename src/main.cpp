@@ -36,6 +36,13 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             case Render_Command_Type::Test_Triangle:
                 renderer.draw_test_triangle();
                 break;
+
+            case Render_Command_Type::Draw_Mesh:
+            {
+                auto *command = (const Render_Command_Draw_Mesh *)header;
+                renderer.draw_mesh(command->mesh, command->transform, commands.view_projection, command->color);
+                break;
+            }
         }
 
         if (header->size == 0)
@@ -90,7 +97,8 @@ int main(int, char**)
 
         auto time = std::chrono::steady_clock::now();
 
-        render_commands.clear_color = clear_color;
+        render_commands.clear_color     = clear_color;
+        render_commands.view_projection = identity();
         render_commands.used        = 0;
 
         Game_Frame frame = {};

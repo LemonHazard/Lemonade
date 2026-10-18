@@ -41,7 +41,7 @@ struct Game_Frame
     u32              width;    // Framebuffer size in pixels
     u32              height;
     bool             reloaded; // The game's code was loaded or reloaded since the previous frame
-    Render_Commands *render;   // Empty, with a default clear color
+    Render_Commands *render;   // Empty, with a default clear color and an identity view_projection
 
     // Set by the game
     bool             quit;     // Closes the game after this frame
