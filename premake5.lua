@@ -85,7 +85,7 @@ project "Engine"
          links { ":libvulkan.so.1" }
          -- GLSL shaders are compiled to SPIR-V by glslc and included as C arrays
          files { "src/vulkan/shaders/*.vert", "src/vulkan/shaders/*.frag" }
-         includedirs { "build/shaders" }
+         includedirs { "modules/common/vulkan/include", "build/shaders" }
 
       filter { "system:linux", "files:src/vulkan/shaders/*" }
          buildmessage "%{file.name}"
