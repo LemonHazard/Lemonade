@@ -127,7 +127,7 @@ function lemonade.engine(opts)
             engine_path("modules/windows/*/lib"),
             "$(DXSDK_DIR)/Lib/x64",
          }
-         links { "d3d11", "d3dcompiler", "dxgi", "imgui", "assimp" }
+         links { "d3d11", "d3dcompiler", "dxgi", "imgui" }
 
       filter "system:linux"
          includedirs { engine_path("modules/linux/*/include") }
