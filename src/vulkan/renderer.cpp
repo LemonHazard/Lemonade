@@ -649,10 +649,13 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vecto
         for (u32 row = 0; row < 3; ++row)
             push.normal_matrix[column][row] = normals.at(row, column);
 
+    // With their size, so that later frames' uploads to the rest of mesh_buffer don't
+    // look like they could overwrite what this draw reads.
     VkCommandBuffer command_buffer = frame.command_buffer;
     VkDeviceSize    offset         = native_mesh->vertex_offset;
+    VkDeviceSize    size           = (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex);
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
-    vkCmdBindVertexBuffers(command_buffer, 0, 1, &n->mesh_buffer, &offset);
+    vkCmdBindVertexBuffers2(command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
     vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
     VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, native_texture->descriptor_set };
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline_layout,
@@ -665,7 +668,7 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vecto
     {
         Shadow_Push_Constants shadow_push = { n->light_view_projection * transform };
         VkCommandBuffer shadow_command_buffer = frame.shadow_command_buffer;
-        vkCmdBindVertexBuffers(shadow_command_buffer, 0, 1, &n->mesh_buffer, &offset);
+        vkCmdBindVertexBuffers2(shadow_command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
         vkCmdBindIndexBuffer(shadow_command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
         vkCmdPushConstants(shadow_command_buffer, n->shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
                            0, sizeof(shadow_push), &shadow_push);
