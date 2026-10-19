@@ -46,6 +46,12 @@ static const u32 sky_frag_spv[] =
 static const u32 environment_frag_spv[] =
 #include "environment.frag.inc"
 ;
+static const u32 bloom_down_frag_spv[] =
+#include "bloom_down.frag.inc"
+;
+static const u32 bloom_up_frag_spv[] =
+#include "bloom_up.frag.inc"
+;
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
@@ -88,6 +94,9 @@ constexpr r32 SHADOW_NORMAL_OFFSET = 2.0f;
 constexpr u32 ENVIRONMENT_SIZE     = 128;
 constexpr u32 ENVIRONMENT_LEVELS   = 6; // 128 down to 4 pixels across
 constexpr u32 IRRADIANCE_SIZE      = 16;
+// The bloom is the frame blurred wide: its levels go from half the frame's size down
+// to this many, or to 8 pixels.
+constexpr u32 MAX_BLOOM_LEVELS     = 8;
 
 // Matches the uniform blocks in shaders/mesh.vert and mesh.frag (std140: vec3s padded
 // to vec4s).
@@ -232,6 +241,22 @@ struct Shadow_Push_Constants
 struct Tonemap_Push_Constants
 {
     r32 exposure;
+    r32 bloom;
+};
+
+// Matches the push constant blocks in shaders/bloom_down.frag and bloom_up.frag.
+struct Bloom_Push_Constants
+{
+    Vector2 source_texel; // Size of a texel of the image read, in UV
+    Vector2 target_texel; // And of the level drawn
+    r32     first;        // 1 for the first step down
+};
+
+enum class Blend_Mode
+{
+    None,
+    Premultiplied, // "Over" what's there
+    Additive,
 };
 
 struct Pipeline_Description
@@ -247,7 +272,7 @@ struct Pipeline_Description
     bool       depth_test;     // Also writes depth
     VkCullModeFlags cull_mode;
     bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
-    bool       blend;          // Premultiplied "over" what's there, without writing depth
+    Blend_Mode blend;          // When it's not None, depth isn't written
 };
 
 class Native_Renderer
@@ -278,6 +303,8 @@ public:
     bool create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
                            VkImage *image, VkDeviceMemory *memory, VkImageView *view);
     void destroy_attachment(VkImage *image, VkDeviceMemory *memory, VkImageView *view);
+    // bloom_image, its levels sized from `extent`, the frame's.
+    bool create_bloom_image(VkExtent2D extent);
     bool create_buffer(u64 size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                        VkBuffer *buffer, VkDeviceMemory *memory);
     // Creates the image and its view, without uploading anything. Leaves `texture`
@@ -317,6 +344,8 @@ public:
     void end_shadow_pass(VkCommandBuffer command_buffer);
     // Draws the scene's colors into the swapchain image, fitted to the display.
     void record_tonemap(VkCommandBuffer command_buffer);
+    // Blurs the scene into bloom_image, leaving both ready to be sampled.
+    void record_bloom(VkCommandBuffer command_buffer);
     // Draws the frame's blended draws over its solid ones, from the farthest on.
     void record_blended_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     bool record_capture(VkCommandBuffer command_buffer);
@@ -389,7 +418,21 @@ public:
     Cube_Map         irradiance_map;
     Vector3          environment_colors[3] = {};
     bool             environment_made      = false;
-    VkDescriptorSet  tonemap_set             = VK_NULL_HANDLE; // hdr_image, from frame_pool
+    VkDescriptorSetLayout tonemap_set_layout = VK_NULL_HANDLE; // The scene, its bloom
+    VkDescriptorSet  tonemap_set             = VK_NULL_HANDLE; // hdr_image and bloom_image, from frame_pool
+    VkPipelineLayout bloom_pipeline_layout   = VK_NULL_HANDLE;
+    VkPipeline       bloom_down_pipeline     = VK_NULL_HANDLE;
+    VkPipeline       bloom_up_pipeline       = VK_NULL_HANDLE;
+    VkSampler        bloom_sampler           = VK_NULL_HANDLE; // Linear, clamped to the edges
+    // The bloom's levels, sized from the swapchain: each one's view, and sets to read
+    // them: [0] reads hdr_image, [1 + i] level i.
+    VkImage          bloom_image             = VK_NULL_HANDLE;
+    VkDeviceMemory   bloom_memory            = VK_NULL_HANDLE;
+    VkImageView      bloom_views[MAX_BLOOM_LEVELS] = {};
+    VkExtent2D       bloom_extents[MAX_BLOOM_LEVELS] = {};
+    u32              bloom_levels            = 0;
+    VkDescriptorSet  bloom_sets[MAX_BLOOM_LEVELS + 1] = {};
+    r32              bloom                   = 0.0f;           // This frame's
     r32              exposure                = 1.0f;           // This frame's
 
     VkDescriptorSetLayout frame_set_layout   = VK_NULL_HANDLE; // Set 0 of the mesh shaders
@@ -493,6 +536,11 @@ Renderer::~Renderer()
         if (n->shadow_pipeline)         vkDestroyPipeline(n->device, n->shadow_pipeline, nullptr);
         if (n->shadow_pipeline_layout)  vkDestroyPipelineLayout(n->device, n->shadow_pipeline_layout, nullptr);
         if (n->tonemap_pipeline)        vkDestroyPipeline(n->device, n->tonemap_pipeline, nullptr);
+        if (n->bloom_down_pipeline)     vkDestroyPipeline(n->device, n->bloom_down_pipeline, nullptr);
+        if (n->bloom_up_pipeline)       vkDestroyPipeline(n->device, n->bloom_up_pipeline, nullptr);
+        if (n->bloom_pipeline_layout)   vkDestroyPipelineLayout(n->device, n->bloom_pipeline_layout, nullptr);
+        if (n->bloom_sampler)           vkDestroySampler(n->device, n->bloom_sampler, nullptr);
+        if (n->tonemap_set_layout)      vkDestroyDescriptorSetLayout(n->device, n->tonemap_set_layout, nullptr);
         if (n->tonemap_pipeline_layout) vkDestroyPipelineLayout(n->device, n->tonemap_pipeline_layout, nullptr);
 
         for (auto &texture : n->textures) n->destroy_texture(&texture);
@@ -636,6 +684,7 @@ bool Renderer::begin_frame(const Render_Commands &commands)
         .inverse_view_projection = inverse(commands.view_projection),
     };
     n->exposure        = lighting.exposure;
+    n->bloom           = lighting.bloom;
     n->camera_position = commands.camera_position;
     n->blended_draws.clear();
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
@@ -867,6 +916,7 @@ bool Native_Renderer::finish_frame(bool capture)
 
     this->record_blended_draws(frame.command_buffer, frame);
     vkCmdEndRendering(frame.command_buffer);
+    this->record_bloom(frame.command_buffer);
     this->record_tonemap(frame.command_buffer);
     this->end_shadow_pass(frame.shadow_command_buffer);
     vkEndCommandBuffer(frame.shadow_command_buffer);
@@ -1085,23 +1135,110 @@ void Native_Renderer::record_blended_draws(VkCommandBuffer command_buffer, Nativ
     }
 }
 
-void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
+void Native_Renderer::record_bloom(VkCommandBuffer command_buffer)
 {
-    VkImageMemoryBarrier2 barriers[2] = {
-        {
-            // After the scene's draws.
+    // A barrier moving bloom levels [first, first + count), or the scene with
+    // VK_REMAINING_MIP_LEVELS, between layouts.
+    auto barrier = [&](u32 first, u32 count, VkImageLayout old_layout, VkImageLayout new_layout,
+                       VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                       VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
+    {
+        bool scene = count == VK_REMAINING_MIP_LEVELS;
+        VkImageMemoryBarrier2 image_barrier = {
             .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-            .dstAccessMask       = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcStageMask        = src_stage,
+            .srcAccessMask       = src_access,
+            .dstStageMask        = dst_stage,
+            .dstAccessMask       = dst_access,
+            .oldLayout           = old_layout,
+            .newLayout           = new_layout,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image               = this->hdr_image,
-            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
-        },
+            .image               = scene ? this->hdr_image : this->bloom_image,
+            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, scene ? 0 : first, scene ? 1 : count, 0, 1 },
+        };
+        VkDependencyInfo dependency = {
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers    = &image_barrier,
+        };
+        vkCmdPipelineBarrier2(command_buffer, &dependency);
+    };
+
+    const VkPipelineStageFlags2 color_output = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const VkPipelineStageFlags2 fragment     = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    const VkAccessFlags2        write        = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const VkAccessFlags2        read_write   = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const VkAccessFlags2        sampled      = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+
+    // After the scene's draws; the levels after the previous frame's tonemapping read them.
+    barrier(0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            color_output, write, fragment, sampled);
+    barrier(0, this->bloom_levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            fragment, 0, color_output, read_write);
+
+    // Draws level `level` from what `source` reads, whose texels are `source_size`.
+    auto draw = [&](VkPipeline pipeline, u32 level, VkDescriptorSet source, VkExtent2D source_size, bool first, bool load)
+    {
+        VkExtent2D size = this->bloom_extents[level];
+        VkRenderingAttachmentInfo color_attachment = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = this->bloom_views[level],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        VkRenderingInfo rendering = {
+            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea           = { { 0, 0 }, size },
+            .layerCount           = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &color_attachment,
+        };
+        vkCmdBeginRendering(command_buffer, &rendering);
+
+        VkViewport viewport = { 0.0f, 0.0f, (float)size.width, (float)size.height, 0.0f, 1.0f };
+        VkRect2D   scissor  = { { 0, 0 }, size };
+        Bloom_Push_Constants push = {
+            .source_texel = { 1.0f / (float)source_size.width, 1.0f / (float)source_size.height },
+            .target_texel = { 1.0f / (float)size.width, 1.0f / (float)size.height },
+            .first        = first ? 1.0f : 0.0f,
+        };
+        vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+        vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+        vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->bloom_pipeline_layout,
+                                0, 1, &source, 0, nullptr);
+        vkCmdPushConstants(command_buffer, this->bloom_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(command_buffer, 3, 1, 0, 0);
+
+        vkCmdEndRendering(command_buffer);
+    };
+
+    // Down: each level from the one before it, the first from the scene.
+    for (u32 level = 0; level < this->bloom_levels; ++level)
+    {
+        VkExtent2D source_size = level == 0 ? this->swapchain_extent : this->bloom_extents[level - 1];
+        draw(this->bloom_down_pipeline, level, this->bloom_sets[level], source_size, level == 0, false);
+        barrier(level, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                color_output, write, fragment, sampled);
+    }
+
+    // Up: each level added to the one before it, from the smallest.
+    for (u32 level = this->bloom_levels - 1; level > 0; --level)
+    {
+        barrier(level - 1, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                fragment, 0, color_output, read_write);
+        draw(this->bloom_up_pipeline, level - 1, this->bloom_sets[level + 1], this->bloom_extents[level], false, true);
+        barrier(level - 1, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                color_output, read_write, fragment, sampled);
+    }
+}
+
+void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
+{
+    // The scene and its bloom are ready to be read: record_bloom() left them so.
+    VkImageMemoryBarrier2 barriers[1] = {
         {
             // After the acquire, which the submit waits for at this stage.
             .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1119,7 +1256,7 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
     };
     VkDependencyInfo dependency = {
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 2,
+        .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers    = barriers,
     };
     vkCmdPipelineBarrier2(command_buffer, &dependency);
@@ -1141,8 +1278,13 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
     };
     vkCmdBeginRendering(command_buffer, &rendering);
 
-    // The viewport and scissor set in begin_frame() still apply.
-    Tonemap_Push_Constants push = { .exposure = this->exposure };
+    // The bloom's passes left theirs.
+    VkViewport viewport = { 0.0f, 0.0f, (float)this->swapchain_extent.width, (float)this->swapchain_extent.height, 0.0f, 1.0f };
+    VkRect2D   scissor  = { { 0, 0 }, this->swapchain_extent };
+    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+
+    Tonemap_Push_Constants push = { .exposure = this->exposure, .bloom = this->bloom };
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->tonemap_pipeline);
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->tonemap_pipeline_layout,
                             0, 1, &this->tonemap_set, 0, nullptr);
@@ -1611,6 +1753,30 @@ bool Native_Renderer::create_texture_resources()
     if (!vk_check(vkCreateDescriptorSetLayout(this->device, &image_layout_info, nullptr, &this->image_set_layout),
                   "vkCreateDescriptorSetLayout")) return false;
 
+    // The scene and its bloom.
+    VkDescriptorSetLayoutBinding tonemap_bindings[2] = { image_binding, image_binding };
+    tonemap_bindings[1].binding = 1;
+    VkDescriptorSetLayoutCreateInfo tonemap_layout_info = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2,
+        .pBindings    = tonemap_bindings,
+    };
+    if (!vk_check(vkCreateDescriptorSetLayout(this->device, &tonemap_layout_info, nullptr, &this->tonemap_set_layout),
+                  "vkCreateDescriptorSetLayout")) return false;
+
+    // Blurring reads past the edges, which should stay there rather than wrap around.
+    VkSamplerCreateInfo bloom_sampler_info = {
+        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter    = VK_FILTER_LINEAR,
+        .minFilter    = VK_FILTER_LINEAR,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    };
+    if (!vk_check(vkCreateSampler(this->device, &bloom_sampler_info, nullptr, &this->bloom_sampler), "vkCreateSampler"))
+        return false;
+
     // Base color, normal and emissive textures, in that order.
     VkDescriptorSetLayoutBinding material_bindings[3];
     for (u32 i = 0; i < 3; ++i)
@@ -1893,14 +2059,14 @@ bool Native_Renderer::create_frame_descriptors()
     if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->frame_set_layout),
                   "vkCreateDescriptorSetLayout")) return false;
 
-    // A set per frame, and the tonemapping's.
+    // A set per frame, the tonemapping's and the bloom's.
     VkDescriptorPoolSize pool_sizes[2] = {
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         .descriptorCount = FRAMES_IN_FLIGHT },
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 3 * FRAMES_IN_FLIGHT + 1 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 3 * FRAMES_IN_FLIGHT + 2 + MAX_BLOOM_LEVELS + 1 },
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = FRAMES_IN_FLIGHT + 1,
+        .maxSets       = FRAMES_IN_FLIGHT + 1 + MAX_BLOOM_LEVELS + 1,
         .poolSizeCount = 2,
         .pPoolSizes    = pool_sizes,
     };
@@ -1975,15 +2141,25 @@ bool Native_Renderer::create_frame_descriptors()
         vkUpdateDescriptorSets(this->device, 4, writes, 0, nullptr);
     }
 
-    // Of hdr_image: written by create_swapchain(), which makes it.
+    // Of hdr_image and bloom_image: written by create_swapchain(), which makes them.
     VkDescriptorSetAllocateInfo tonemap_set_info = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = this->frame_pool,
         .descriptorSetCount = 1,
-        .pSetLayouts        = &this->image_set_layout,
+        .pSetLayouts        = &this->tonemap_set_layout,
     };
-    return vk_check(vkAllocateDescriptorSets(this->device, &tonemap_set_info, &this->tonemap_set),
-                    "vkAllocateDescriptorSets");
+    if (!vk_check(vkAllocateDescriptorSets(this->device, &tonemap_set_info, &this->tonemap_set),
+                  "vkAllocateDescriptorSets")) return false;
+
+    VkDescriptorSetLayout bloom_layouts[MAX_BLOOM_LEVELS + 1];
+    for (auto &layout : bloom_layouts) layout = this->image_set_layout;
+    VkDescriptorSetAllocateInfo bloom_set_info = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = this->frame_pool,
+        .descriptorSetCount = MAX_BLOOM_LEVELS + 1,
+        .pSetLayouts        = bloom_layouts,
+    };
+    return vk_check(vkAllocateDescriptorSets(this->device, &bloom_set_info, this->bloom_sets), "vkAllocateDescriptorSets");
 }
 
 void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, VkFormat format, Native_Texture *texture)
@@ -2394,7 +2570,7 @@ bool Native_Renderer::create_pipelines()
     VkPipelineLayoutCreateInfo tonemap_layout_info = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount         = 1,
-        .pSetLayouts            = &this->image_set_layout,
+        .pSetLayouts            = &this->tonemap_set_layout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &tonemap_push_constants,
     };
@@ -2414,6 +2590,42 @@ bool Native_Renderer::create_pipelines()
         .cull_mode     = VK_CULL_MODE_NONE,
     };
     if (!this->create_graphics_pipeline(tonemap, &this->tonemap_pipeline)) return false;
+
+    // The bloom's steps: a screen-covering triangle reading an image, drawing a level.
+    VkPushConstantRange bloom_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(Bloom_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo bloom_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->image_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &bloom_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &bloom_layout_info, nullptr, &this->bloom_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    Pipeline_Description bloom_down = {
+        .vertex_code   = tonemap_vert_spv,
+        .vertex_size   = sizeof(tonemap_vert_spv),
+        .fragment_code = bloom_down_frag_spv,
+        .fragment_size = sizeof(bloom_down_frag_spv),
+        .vertex_input  = &no_vertex_input,
+        .layout        = this->bloom_pipeline_layout,
+        .color_format  = HDR_FORMAT,
+        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
+    };
+    if (!this->create_graphics_pipeline(bloom_down, &this->bloom_down_pipeline)) return false;
+
+    Pipeline_Description bloom_up = bloom_down;
+    bloom_up.fragment_code = bloom_up_frag_spv;
+    bloom_up.fragment_size = sizeof(bloom_up_frag_spv);
+    bloom_up.blend         = Blend_Mode::Additive;
+    if (!this->create_graphics_pipeline(bloom_up, &this->bloom_up_pipeline)) return false;
 
     // The sky's maps: a screen-covering triangle for each face, reading the frame's uniforms.
     VkPushConstantRange environment_push_constants = {
@@ -2516,7 +2728,7 @@ bool Native_Renderer::create_pipelines()
     if (!this->create_graphics_pipeline(mesh, &this->mesh_pipeline)) return false;
 
     Pipeline_Description mesh_blend = mesh;
-    mesh_blend.blend = true;
+    mesh_blend.blend = Blend_Mode::Premultiplied;
     if (!this->create_graphics_pipeline(mesh_blend, &this->mesh_blend_pipeline)) return false;
 
     // Meshes' positions alone, from the same vertices.
@@ -2612,16 +2824,18 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         VkPipelineDepthStencilStateCreateInfo depth_stencil = {
             .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .depthTestEnable  = description.depth_test,
-            .depthWriteEnable = description.depth_test && !description.blend,
+            .depthWriteEnable = description.depth_test && description.blend == Blend_Mode::None,
             .depthCompareOp   = VK_COMPARE_OP_LESS,
         };
+        VkBlendFactor destination = description.blend == Blend_Mode::Additive ? VK_BLEND_FACTOR_ONE
+                                                                              : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         VkPipelineColorBlendAttachmentState blend_attachment = {
-            .blendEnable         = description.blend,
+            .blendEnable         = description.blend != Blend_Mode::None,
             .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .dstColorBlendFactor = destination,
             .colorBlendOp        = VK_BLEND_OP_ADD,
             .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .dstAlphaBlendFactor = destination,
             .alphaBlendOp        = VK_BLEND_OP_ADD,
             .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
@@ -2760,24 +2974,88 @@ bool Native_Renderer::create_swapchain(u32 width, u32 height)
                                  VK_IMAGE_ASPECT_COLOR_BIT, &this->hdr_image, &this->hdr_memory, &this->hdr_view))
         return false;
 
-    // The tonemapping reads texels where it draws, so the sampler doesn't matter.
-    VkDescriptorImageInfo hdr_descriptor = {
-        .sampler     = this->sampler,
-        .imageView   = this->hdr_view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    if (!this->create_bloom_image(extent)) return false;
+
+    // The tonemapping reads the scene's texels where it draws, the bloom between them;
+    // the bloom's first step reads the scene, each other one a level.
+    std::vector<VkDescriptorImageInfo> images;
+    std::vector<VkWriteDescriptorSet>  writes;
+    images.reserve(3 + MAX_BLOOM_LEVELS);
+    auto write = [&](VkDescriptorSet set, u32 binding, VkImageView view)
+    {
+        images.push_back({ this->bloom_sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
+        writes.push_back({
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = set,
+            .dstBinding      = binding,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &images.back(),
+        });
     };
-    VkWriteDescriptorSet write = {
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = this->tonemap_set,
-        .dstBinding      = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo      = &hdr_descriptor,
-    };
-    vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
+    write(this->tonemap_set, 0, this->hdr_view);
+    write(this->tonemap_set, 1, this->bloom_views[0]);
+    write(this->bloom_sets[0], 0, this->hdr_view);
+    for (u32 level = 0; level < this->bloom_levels; ++level) write(this->bloom_sets[1 + level], 0, this->bloom_views[level]);
+    vkUpdateDescriptorSets(this->device, (u32)writes.size(), writes.data(), 0, nullptr);
 
     this->swapchain_extent = extent;
     this->swapchain_dirty  = false;
+    return true;
+}
+
+bool Native_Renderer::create_bloom_image(VkExtent2D extent)
+{
+    // From half the frame down, while levels are at least 8 pixels.
+    VkExtent2D size = { extent.width / 2 > 0 ? extent.width / 2 : 1, extent.height / 2 > 0 ? extent.height / 2 : 1 };
+    this->bloom_levels = 0;
+    for (VkExtent2D level = size; this->bloom_levels < MAX_BLOOM_LEVELS && (this->bloom_levels == 0 ||
+         (level.width >= 8 && level.height >= 8)); level = { level.width / 2, level.height / 2 })
+    {
+        this->bloom_extents[this->bloom_levels++] = level;
+    }
+
+    VkImageCreateInfo image_info = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = HDR_FORMAT,
+        .extent        = { size.width, size.height, 1 },
+        .mipLevels     = this->bloom_levels,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, &this->bloom_image), "vkCreateImage")) return false;
+
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(this->device, this->bloom_image, &requirements);
+
+    u32 memory_type = this->find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memory_type == UINT32_MAX) memory_type = this->find_memory_type(requirements.memoryTypeBits, 0);
+
+    VkMemoryAllocateInfo allocate = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = requirements.size,
+        .memoryTypeIndex = memory_type,
+    };
+    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, &this->bloom_memory), "vkAllocateMemory")) return false;
+    if (!vk_check(vkBindImageMemory(this->device, this->bloom_image, this->bloom_memory, 0), "vkBindImageMemory")) return false;
+
+    for (u32 level = 0; level < this->bloom_levels; ++level)
+    {
+        VkImageViewCreateInfo view_info = {
+            .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image            = this->bloom_image,
+            .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+            .format           = HDR_FORMAT,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1 },
+        };
+        if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &this->bloom_views[level]), "vkCreateImageView"))
+            return false;
+    }
     return true;
 }
 
@@ -2848,6 +3126,17 @@ void Native_Renderer::destroy_swapchain_resources()
 
     this->destroy_attachment(&this->depth_image, &this->depth_memory, &this->depth_view);
     this->destroy_attachment(&this->hdr_image, &this->hdr_memory, &this->hdr_view);
+
+    for (VkImageView &view : this->bloom_views)
+    {
+        if (view) vkDestroyImageView(this->device, view, nullptr);
+        view = VK_NULL_HANDLE;
+    }
+    if (this->bloom_image)  vkDestroyImage(this->device, this->bloom_image, nullptr);
+    if (this->bloom_memory) vkFreeMemory(this->device, this->bloom_memory, nullptr);
+    this->bloom_image  = VK_NULL_HANDLE;
+    this->bloom_memory = VK_NULL_HANDLE;
+    this->bloom_levels = 0;
 }
 
 #endif // RENDERER_VULKAN

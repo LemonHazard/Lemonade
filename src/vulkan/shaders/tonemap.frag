@@ -4,10 +4,13 @@
 layout(push_constant) uniform Push
 {
     float exposure;
+    float bloom; // How much of the bloom to blend in
 } push;
 
 // The frame as rendered: linear colors, which can go past 1. Same size as the screen.
 layout(set = 0, binding = 0) uniform sampler2D scene;
+// Its glow: the frame blurred wide, at half its size (see bloom_up.frag).
+layout(set = 0, binding = 1) uniform sampler2D bloom;
 
 layout(location = 0) out vec4 out_color;
 
@@ -38,6 +41,9 @@ vec3 tonemap(vec3 color)
 
 void main()
 {
-    vec3 color = texelFetch(scene, ivec2(gl_FragCoord.xy), 0).rgb * push.exposure;
+    // A blend, so the light is spread around rather than added: what's only a little
+    // brighter than around it hardly changes.
+    vec2 uv    = gl_FragCoord.xy / vec2(textureSize(scene, 0));
+    vec3 color = mix(texelFetch(scene, ivec2(gl_FragCoord.xy), 0).rgb, texture(bloom, uv).rgb, push.bloom) * push.exposure;
     out_color = vec4(tonemap(max(color, vec3(0.0))), 1.0);
 }
