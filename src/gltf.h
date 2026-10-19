@@ -6,9 +6,9 @@
 // Loads binary glTF 2.0 (.glb) models, as Blender exports them.
 //
 // Every triangle primitive of the default scene goes into one Mesh, with its node's
-// transform applied, so the mesh sits as it did in the scene. Only positions and
-// normals are read (normals are computed when missing); materials, textures,
-// animations and skins are ignored. Data must be in the file's binary chunk: external
+// transform applied, so the mesh sits as it did in the scene. Only positions, normals
+// (computed when missing) and the first texture coordinates (0, 0 when missing) are
+// read; materials, textures, animations and skins are ignored. Data must be in the file's binary chunk: external
 // buffers, sparse accessors and quantized positions aren't supported.
 //
 // The vertices and indices are written to `storage` (4-byte aligned); the returned

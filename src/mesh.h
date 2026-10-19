@@ -10,6 +10,7 @@ struct Mesh_Vertex
 {
     Vector3 position;
     Vector3 normal;   // Unit length
+    Vector2 uv;       // Texture coordinates: (0, 0) is the texture's top-left corner
 };
 
 struct Mesh

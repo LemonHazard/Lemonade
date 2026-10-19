@@ -6,26 +6,31 @@
 #include <string>
 #include <vector>
 
-// A .glb with one triangle in the XY plane, counter-clockwise seen from +Z, and no
-// normals. `node` is the JSON of the node that holds the mesh.
-static std::vector<u8> gltf_spec_triangle_glb(const std::string &node)
+// A .glb with one triangle in the XY plane, counter-clockwise seen from +Z, no normals
+// and, when `with_uvs`, texture coordinates. `node` is the JSON of the node that holds
+// the mesh.
+static std::vector<u8> gltf_spec_triangle_glb(const std::string &node, bool with_uvs = false)
 {
     const float positions[9] = { 0, 0, 0,   1, 0, 0,   0, 1, 0 };
     const u16   indices[4]   = { 0, 1, 2,   0 }; // Padded to 4 bytes
+    const float uvs[6]       = { 0.25f, 0.5f,   1, 0.5f,   0.25f, 0 };
 
     std::string json =
         R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],)"
         R"("nodes":[)" + node + R"(],)"
-        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],)"
+        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0)" + (with_uvs ? R"(,"TEXCOORD_0":2)" : "") + R"(},"indices":1}]}],)"
         R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},)"
-        R"({"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],)"
-        R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],)"
-        R"("buffers":[{"byteLength":44}]})";
+        R"({"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},)"
+        R"({"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],)"
+        R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6},)"
+        R"({"buffer":0,"byteOffset":44,"byteLength":24}],)"
+        R"("buffers":[{"byteLength":68}]})";
     while (json.size() % 4) json += ' ';
 
-    std::vector<u8> bin(44);
+    std::vector<u8> bin(68);
     memcpy(bin.data(), positions, sizeof(positions));
     memcpy(bin.data() + 36, indices, sizeof(indices));
+    memcpy(bin.data() + 44, uvs, sizeof(uvs));
 
     std::vector<u8> glb;
     auto put_u32 = [&](u32 value) { glb.insert(glb.end(), (u8 *)&value, (u8 *)&value + 4); };
@@ -89,6 +94,35 @@ TEST_CASE("load_glb_from_memory keeps mirrored triangles facing out", "[gltf]")
     REQUIRE(mesh.indices[1] == 2);
     REQUIRE(mesh.indices[2] == 1);
     REQUIRE(mesh.vertices[0].normal.z == -1.0f);
+}
+
+TEST_CASE("load_glb_from_memory reads texture coordinates", "[gltf]")
+{
+    std::vector<u8> glb = gltf_spec_triangle_glb(R"({"mesh":0})", true);
+
+    alignas(4) u8 storage[256];
+    Mesh mesh;
+    REQUIRE(load_glb_from_memory(glb.data(), glb.size(), &mesh, storage, sizeof(storage)));
+
+    REQUIRE(mesh.vertices[0].uv.x == 0.25f);
+    REQUIRE(mesh.vertices[0].uv.y == 0.5f);
+    REQUIRE(mesh.vertices[1].uv.x == 1.0f);
+    REQUIRE(mesh.vertices[2].uv.y == 0.0f);
+}
+
+TEST_CASE("load_glb_from_memory leaves texture coordinates at zero when missing", "[gltf]")
+{
+    std::vector<u8> glb = gltf_spec_triangle_glb(R"({"mesh":0})");
+
+    alignas(4) u8 storage[256];
+    Mesh mesh;
+    REQUIRE(load_glb_from_memory(glb.data(), glb.size(), &mesh, storage, sizeof(storage)));
+
+    for (u32 i = 0; i < 3; ++i)
+    {
+        REQUIRE(mesh.vertices[i].uv.x == 0.0f);
+        REQUIRE(mesh.vertices[i].uv.y == 0.0f);
+    }
 }
 
 TEST_CASE("load_glb_from_memory fails when the storage is too small", "[gltf]")

@@ -169,6 +169,29 @@ static Vector3 gltf_read_vector3(const Gltf_Accessor &accessor, u64 i)
     return v;
 }
 
+// Texture coordinates are floats, or unsigned bytes or shorts normalized to 0..1.
+static Vector2 gltf_read_uv(const Gltf_Accessor &accessor, u64 i)
+{
+    const u8 *at = accessor.data + i * accessor.stride;
+    switch (accessor.component_type)
+    {
+        case GLTF_UNSIGNED_BYTE:
+            return { at[0] / 255.0f, at[1] / 255.0f };
+        case GLTF_UNSIGNED_SHORT:
+        {
+            u16 value[2];
+            memcpy(value, at, sizeof(value));
+            return { value[0] / 65535.0f, value[1] / 65535.0f };
+        }
+        default:
+        {
+            Vector2 uv;
+            memcpy(&uv.x, at, 2 * sizeof(float));
+            return uv;
+        }
+    }
+}
+
 static u32 gltf_read_index(const Gltf_Accessor &accessor, u64 i)
 {
     const u8 *at = accessor.data + i * accessor.stride;
@@ -215,6 +238,21 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
         }
     }
 
+    Gltf_Accessor uvs = {};
+    bool has_uvs = !attributes["TEXCOORD_0"].is_null();
+    if (has_uvs)
+    {
+        if (!gltf_accessor(loader, attributes["TEXCOORD_0"], &uvs)) return false;
+        bool valid_type = uvs.component_type == GLTF_FLOAT ||
+                          uvs.component_type == GLTF_UNSIGNED_BYTE ||
+                          uvs.component_type == GLTF_UNSIGNED_SHORT;
+        if (!valid_type || uvs.components != 2 || uvs.count != positions.count)
+        {
+            log_error("glTF: texture coordinates must be 2D vectors of floats or normalized unsigned integers, one per position");
+            return false;
+        }
+    }
+
     u64 base = loader->vertices.size();
     if (base + positions.count > UINT32_MAX)
     {
@@ -230,6 +268,7 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
         vertex.position = transform_point(transform, gltf_read_vector3(positions, i));
         vertex.normal   = has_normals ? normalize(transform_vector(normals_transform, gltf_read_vector3(normals, i)))
                                       : Vector3 { 0.0f, 0.0f, 0.0f };
+        vertex.uv       = has_uvs ? gltf_read_uv(uvs, i) : Vector2 { 0.0f, 0.0f };
     }
 
     u64 first_index = loader->indices.size();
