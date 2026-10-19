@@ -37,8 +37,9 @@ constexpr u32 MAX_MESHES           = 4096;
 constexpr u32 MESH_SLOT_BITS       = 13; // The hash table has twice MAX_MESHES slots
 constexpr u32 MESH_SLOTS           = 1u << MESH_SLOT_BITS;
 static_assert(MESH_SLOTS >= 2 * MAX_MESHES, "The mesh hash table needs empty slots to end its probes");
-// New meshes go through a staging buffer of this size each frame: when it's full the
-// rest are drawn from the next frames on, and bigger meshes aren't drawn at all.
+// New meshes and textures go through a staging buffer of this size each frame: when
+// it's full the rest are drawn from the next frames on. Bigger textures are uploaded a
+// band of rows per frame; bigger meshes aren't drawn at all.
 constexpr u64 STAGING_BUFFER_SIZE  = 16 * MiB;
 // Textures stay on the GPU once drawn: past this many, meshes are drawn untextured.
 constexpr u32 MAX_TEXTURES         = 256;
@@ -52,13 +53,14 @@ struct Native_Renderer_Frame
     VkSemaphore     image_acquired = VK_NULL_HANDLE;
     VkFence         in_flight      = VK_NULL_HANDLE;
 
-    // Copies of the frame's new meshes to mesh_buffer, submitted just before
-    // command_buffer: rendering has begun there, and copies can't go inside it.
+    // Copies of the frame's new meshes to mesh_buffer and of its new textures' rows,
+    // submitted just before command_buffer: rendering has begun there, and copies
+    // can't go inside it.
     VkCommandBuffer upload_command_buffer = VK_NULL_HANDLE;
     bool            uploading             = false; // upload_command_buffer has begun
 
-    // Host-visible vertices and indices of the frame's new meshes, filled from the
-    // start each frame: the GPU is done with it once in_flight is signaled.
+    // Host-visible vertices, indices and pixels of the frame's uploads, filled from
+    // the start each frame: the GPU is done with it once in_flight is signaled.
     VkBuffer        staging_buffer = VK_NULL_HANDLE;
     VkDeviceMemory  staging_memory = VK_NULL_HANDLE;
     u8             *staging_mapped = nullptr;
@@ -77,13 +79,17 @@ struct Native_Mesh
     u64                index_offset  = 0;
 };
 
-// A texture copied to the GPU, with the descriptor set the mesh shaders sample it
-// through. No descriptor set means it couldn't be created: it's drawn white.
+// A texture on the GPU, with the descriptor set the mesh shaders sample it through.
+// No descriptor set means it couldn't be created: it's drawn white. Its pixels are
+// copied over one or more frames, from the top row down; meshes are drawn with it once
+// they're all there.
 struct Native_Texture
 {
     const u8       *pixels         = nullptr; // The game's, to recognize the texture by
     u32             width          = 0;
     u32             height         = 0;
+    u32             mip_levels     = 0;
+    u32             rows_uploaded  = 0;       // From the top, with their copies recorded
     VkImage         image          = VK_NULL_HANDLE;
     VkDeviceMemory  memory         = VK_NULL_HANDLE;
     VkImageView     view           = VK_NULL_HANDLE;
@@ -129,14 +135,25 @@ public:
     bool create_depth_buffer(VkExtent2D extent);
     bool create_buffer(u64 size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                        VkBuffer *buffer, VkDeviceMemory *memory);
-    // Uploads the pixels and waits for it. Leaves `texture` without a descriptor set on failure.
+    // Creates the image and its descriptor set, without uploading anything. Leaves
+    // `texture` without a descriptor set on failure.
     void create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture);
+    // Records the copy of as many of the texture's remaining rows as the frame's
+    // staging buffer has room for, and its mip levels once the last ones are in.
+    void upload_texture(Native_Texture *texture, Native_Renderer_Frame &frame);
     void destroy_texture(Native_Texture *texture);
-    // The GPU copy of a texture, made the first time it's drawn.
-    const Native_Texture *find_texture(const Texture &texture);
+    // The GPU copy of a texture, created the first time it's drawn and uploaded over
+    // that frame and the next ones. Returns nullptr while it's being uploaded: draws
+    // with it wait.
+    const Native_Texture *find_texture(const Texture &texture, Native_Renderer_Frame &frame);
     // The GPU copy of a mesh, recorded into the frame's uploads the first time it's
     // drawn. Returns nullptr when the mesh can't be drawn this frame (logged).
     const Native_Mesh *find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame);
+    // Begins the frame's upload_command_buffer, unless it already has.
+    void begin_uploads(Native_Renderer_Frame &frame);
+    // Ends the frame's upload_command_buffer, after a barrier making its mesh copies
+    // visible to the draws submitted after it.
+    void end_uploads(Native_Renderer_Frame &frame);
     void destroy_swapchain_resources();
     // Ends the frame's commands, submits and presents it. With `capture` the frame is
     // also copied to capture_buffer: returns whether it was, so that waiting for the
@@ -184,7 +201,6 @@ public:
     VkDescriptorSetLayout texture_set_layout = VK_NULL_HANDLE;
     VkDescriptorPool      texture_pool       = VK_NULL_HANDLE;
     VkSampler             sampler            = VK_NULL_HANDLE;
-    VkCommandPool         upload_pool        = VK_NULL_HANDLE; // For texture uploads
     Native_Texture        white_texture;                       // For meshes drawn without one
     Native_Texture        textures[MAX_TEXTURES];
     u32                   texture_count      = 0;
@@ -268,7 +284,6 @@ Renderer::~Renderer()
         if (n->texture_pool)       vkDestroyDescriptorPool(n->device, n->texture_pool, nullptr); // Frees the sets
         if (n->texture_set_layout) vkDestroyDescriptorSetLayout(n->device, n->texture_set_layout, nullptr);
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
-        if (n->upload_pool)        vkDestroyCommandPool(n->device, n->upload_pool, nullptr);
 
         if (n->mesh_buffer) vkDestroyBuffer(n->device, n->mesh_buffer, nullptr);
         if (n->mesh_memory) vkFreeMemory(n->device, n->mesh_memory, nullptr);
@@ -458,8 +473,9 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
     const Native_Mesh *native_mesh = n->find_mesh(mesh, frame);
     if (!native_mesh) return;
 
-    // Before anything is recorded for the mesh: a texture's first draw uploads it.
-    const Native_Texture *native_texture = n->find_texture(texture);
+    // Not drawn until its texture is all there, which can take a few frames.
+    const Native_Texture *native_texture = n->find_texture(texture, frame);
+    if (!native_texture) return;
 
     Mesh_Push_Constants push = {};
     push.model_view_projection = view_projection * transform;
@@ -552,25 +568,7 @@ bool Native_Renderer::finish_frame(bool capture)
 
     vkEndCommandBuffer(frame.command_buffer);
 
-    if (frame.uploading)
-    {
-        // Covers the draws of this frame and the later ones, which come after it in
-        // submission order.
-        VkMemoryBarrier2 to_vertex_input = {
-            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT,
-        };
-        VkDependencyInfo upload_dependency = {
-            .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .memoryBarrierCount = 1,
-            .pMemoryBarriers    = &to_vertex_input,
-        };
-        vkCmdPipelineBarrier2(frame.upload_command_buffer, &upload_dependency);
-        vkEndCommandBuffer(frame.upload_command_buffer);
-    }
+    if (frame.uploading) this->end_uploads(frame);
 
     VkSemaphoreSubmitInfo wait_info = {
         .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -619,6 +617,38 @@ bool Native_Renderer::finish_frame(bool capture)
 
     this->frame_index = (this->frame_index + 1) % FRAMES_IN_FLIGHT;
     return captured;
+}
+
+void Native_Renderer::begin_uploads(Native_Renderer_Frame &frame)
+{
+    if (frame.uploading) return;
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(frame.upload_command_buffer, &begin_info);
+    frame.uploading = true;
+}
+
+void Native_Renderer::end_uploads(Native_Renderer_Frame &frame)
+{
+    // Covers the draws of this frame and the later ones, which come after it in
+    // submission order. Textures have their own barriers, in upload_texture().
+    VkMemoryBarrier2 to_vertex_input = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+        .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT,
+    };
+    VkDependencyInfo dependency = {
+        .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers    = &to_vertex_input,
+    };
+    vkCmdPipelineBarrier2(frame.upload_command_buffer, &dependency);
+    vkEndCommandBuffer(frame.upload_command_buffer);
 }
 
 bool Native_Renderer::record_capture(VkCommandBuffer command_buffer)
@@ -1077,17 +1107,31 @@ bool Native_Renderer::create_texture_resources()
     };
     if (!vk_check(vkCreateSampler(this->device, &sampler_info, nullptr, &this->sampler), "vkCreateSampler")) return false;
 
-    VkCommandPoolCreateInfo upload_pool_info = {
-        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-        .queueFamilyIndex = this->queue_family,
-    };
-    if (!vk_check(vkCreateCommandPool(this->device, &upload_pool_info, nullptr, &this->upload_pool),
-                  "vkCreateCommandPool")) return false;
-
+    // The white texture is there from the first frame on: its upload goes through the
+    // first frame's staging buffer and is waited for, before any frame begins.
     static const u8 white[4] = { 255, 255, 255, 255 };
+    Native_Renderer_Frame &frame = this->frames[0];
     this->create_texture(white, 1, 1, &this->white_texture);
-    return this->white_texture.descriptor_set != VK_NULL_HANDLE;
+    if (!this->white_texture.descriptor_set) return false;
+    this->upload_texture(&this->white_texture, frame);
+    this->end_uploads(frame);
+
+    VkCommandBufferSubmitInfo command_buffer_info = {
+        .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = frame.upload_command_buffer,
+    };
+    VkSubmitInfo2 submit = {
+        .sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos    = &command_buffer_info,
+    };
+    bool ok = vk_check(vkQueueSubmit2(this->queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2")
+           && vk_check(vkQueueWaitIdle(this->queue), "vkQueueWaitIdle");
+
+    vkResetCommandPool(this->device, frame.command_pool, 0);
+    frame.uploading    = false;
+    frame.staging_used = 0;
+    return ok;
 }
 
 void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture)
@@ -1108,6 +1152,16 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
     {
         for (u32 size = width > height ? width : height; size > 1; size /= 2) ++mip_levels;
     }
+    texture->mip_levels = mip_levels;
+
+    // On failure the texture keeps just what it's recognized by, and is drawn white.
+    auto fail = [&]()
+    {
+        this->destroy_texture(texture);
+        texture->pixels = pixels;
+        texture->width  = width;
+        texture->height = height;
+    };
 
     VkImageCreateInfo image_info = {
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1122,7 +1176,7 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
         .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
-    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, &texture->image), "vkCreateImage")) return;
+    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, &texture->image), "vkCreateImage")) return fail();
 
     VkMemoryRequirements requirements;
     vkGetImageMemoryRequirements(this->device, texture->image, &requirements);
@@ -1135,131 +1189,8 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
         .allocationSize  = requirements.size,
         .memoryTypeIndex = memory_type,
     };
-    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, &texture->memory), "vkAllocateMemory")) return;
-    if (!vk_check(vkBindImageMemory(this->device, texture->image, texture->memory, 0), "vkBindImageMemory")) return;
-
-    // The pixels go through a host-visible staging buffer.
-    u64            size           = texture_storage_size(width, height);
-    VkBuffer       staging        = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    void          *staging_mapped = nullptr;
-    bool ok = this->create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                  &staging, &staging_memory)
-           && vk_check(vkMapMemory(this->device, staging_memory, 0, VK_WHOLE_SIZE, 0, &staging_mapped), "vkMapMemory");
-
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-    if (ok)
-    {
-        memcpy(staging_mapped, pixels, size);
-
-        VkCommandBufferAllocateInfo allocate_info = {
-            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool        = this->upload_pool,
-            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        ok = vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &command_buffer), "vkAllocateCommandBuffers");
-    }
-
-    if (ok)
-    {
-        VkCommandBufferBeginInfo begin_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        };
-        vkBeginCommandBuffer(command_buffer, &begin_info);
-
-        // A barrier moving mip levels [first, first + count) between layouts.
-        auto barrier = [&](u32 first, u32 count, VkImageLayout old_layout, VkImageLayout new_layout,
-                           VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
-                           VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
-        {
-            VkImageMemoryBarrier2 image_barrier = {
-                .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                .srcStageMask        = src_stage,
-                .srcAccessMask       = src_access,
-                .dstStageMask        = dst_stage,
-                .dstAccessMask       = dst_access,
-                .oldLayout           = old_layout,
-                .newLayout           = new_layout,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image               = texture->image,
-                .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, first, count, 0, 1 },
-            };
-            VkDependencyInfo dependency = {
-                .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .imageMemoryBarrierCount = 1,
-                .pImageMemoryBarriers    = &image_barrier,
-            };
-            vkCmdPipelineBarrier2(command_buffer, &dependency);
-        };
-
-        const VkPipelineStageFlags2 transfer = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-
-        barrier(0, mip_levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_PIPELINE_STAGE_2_NONE, 0, transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
-        VkBufferImageCopy copy = {
-            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-            .imageExtent      = { width, height, 1 },
-        };
-        vkCmdCopyBufferToImage(command_buffer, staging, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-
-        // Each level is half the previous one (at least 1 pixel), filtered down from it.
-        i32 level_width  = (i32)width;
-        i32 level_height = (i32)height;
-        for (u32 level = 1; level < mip_levels; ++level)
-        {
-            barrier(level - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, transfer, VK_ACCESS_2_TRANSFER_READ_BIT);
-
-            i32 next_width  = level_width  > 1 ? level_width  / 2 : 1;
-            i32 next_height = level_height > 1 ? level_height / 2 : 1;
-            VkImageBlit blit = {
-                .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1 },
-                .srcOffsets     = { { 0, 0, 0 }, { level_width, level_height, 1 } },
-                .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 },
-                .dstOffsets     = { { 0, 0, 0 }, { next_width, next_height, 1 } },
-            };
-            vkCmdBlitImage(command_buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-
-            level_width  = next_width;
-            level_height = next_height;
-        }
-
-        // All levels but the last were blit sources; the last was only written.
-        const VkPipelineStageFlags2 fragment = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        if (mip_levels > 1)
-        {
-            barrier(0, mip_levels - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    transfer, VK_ACCESS_2_TRANSFER_READ_BIT, fragment, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        }
-        barrier(mip_levels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, fragment, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-
-        vkEndCommandBuffer(command_buffer);
-
-        // Waiting keeps it simple: textures are uploaded once, usually while loading.
-        VkCommandBufferSubmitInfo command_buffer_info = {
-            .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-            .commandBuffer = command_buffer,
-        };
-        VkSubmitInfo2 submit = {
-            .sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-            .commandBufferInfoCount = 1,
-            .pCommandBufferInfos    = &command_buffer_info,
-        };
-        ok = vk_check(vkQueueSubmit2(this->queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2")
-          && vk_check(vkQueueWaitIdle(this->queue), "vkQueueWaitIdle");
-    }
-
-    if (command_buffer) vkFreeCommandBuffers(this->device, this->upload_pool, 1, &command_buffer);
-    if (staging)        vkDestroyBuffer(this->device, staging, nullptr);
-    if (staging_memory) vkFreeMemory(this->device, staging_memory, nullptr); // Unmaps it
-    if (!ok) return;
+    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, &texture->memory), "vkAllocateMemory")) return fail();
+    if (!vk_check(vkBindImageMemory(this->device, texture->image, texture->memory, 0), "vkBindImageMemory")) return fail();
 
     VkImageViewCreateInfo view_info = {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1268,8 +1199,9 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
         .format           = TEXTURE_FORMAT,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, 1 },
     };
-    if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &texture->view), "vkCreateImageView")) return;
+    if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &texture->view), "vkCreateImageView")) return fail();
 
+    // Sets aren't freed one by one, so this comes last: nothing can fail after it.
     VkDescriptorSetAllocateInfo set_info = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = this->texture_pool,
@@ -1277,8 +1209,9 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
         .pSetLayouts        = &this->texture_set_layout,
     };
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-    if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &descriptor_set), "vkAllocateDescriptorSets")) return;
+    if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &descriptor_set), "vkAllocateDescriptorSets")) return fail();
 
+    // The image is in this layout by the time the set is used: draws wait for the upload.
     VkDescriptorImageInfo image_descriptor = {
         .sampler     = this->sampler,
         .imageView   = texture->view,
@@ -1297,6 +1230,106 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
     texture->descriptor_set = descriptor_set;
 }
 
+void Native_Renderer::upload_texture(Native_Texture *texture, Native_Renderer_Frame &frame)
+{
+    // As many of the remaining rows as the staging buffer has room for.
+    u64 row_size = (u64)texture->width * 4;
+    u32 rows     = texture->height - texture->rows_uploaded;
+    u64 room     = (STAGING_BUFFER_SIZE - frame.staging_used) / row_size;
+    if (rows > room) rows = (u32)room;
+    if (rows == 0) return;
+
+    memcpy(frame.staging_mapped + frame.staging_used, texture->pixels + texture->rows_uploaded * row_size, rows * row_size);
+
+    this->begin_uploads(frame);
+    VkCommandBuffer command_buffer = frame.upload_command_buffer;
+
+    // A barrier moving mip levels [first, first + count) between layouts.
+    auto barrier = [&](u32 first, u32 count, VkImageLayout old_layout, VkImageLayout new_layout,
+                       VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                       VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
+    {
+        VkImageMemoryBarrier2 image_barrier = {
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask        = src_stage,
+            .srcAccessMask       = src_access,
+            .dstStageMask        = dst_stage,
+            .dstAccessMask       = dst_access,
+            .oldLayout           = old_layout,
+            .newLayout           = new_layout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = texture->image,
+            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, first, count, 0, 1 },
+        };
+        VkDependencyInfo dependency = {
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers    = &image_barrier,
+        };
+        vkCmdPipelineBarrier2(command_buffer, &dependency);
+    };
+
+    const VkPipelineStageFlags2 transfer   = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    const u32                   mip_levels = texture->mip_levels;
+
+    // The image stays laid out for copies until its last rows are in: the copies of
+    // later frames write other rows, so they need no barrier between them.
+    if (texture->rows_uploaded == 0)
+    {
+        barrier(0, mip_levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE, 0, transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+
+    VkBufferImageCopy copy = {
+        .bufferOffset     = frame.staging_used,
+        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageOffset      = { 0, (i32)texture->rows_uploaded, 0 },
+        .imageExtent      = { texture->width, rows, 1 },
+    };
+    vkCmdCopyBufferToImage(command_buffer, frame.staging_buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &copy);
+
+    // Meshes are staged at 16-byte aligned offsets.
+    frame.staging_used     += (rows * row_size + 15) & ~(u64)15;
+    texture->rows_uploaded += rows;
+    if (texture->rows_uploaded < texture->height) return;
+
+    // Each level is half the previous one (at least 1 pixel), filtered down from it.
+    i32 level_width  = (i32)texture->width;
+    i32 level_height = (i32)texture->height;
+    for (u32 level = 1; level < mip_levels; ++level)
+    {
+        barrier(level - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, transfer, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+        i32 next_width  = level_width  > 1 ? level_width  / 2 : 1;
+        i32 next_height = level_height > 1 ? level_height / 2 : 1;
+        VkImageBlit blit = {
+            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1 },
+            .srcOffsets     = { { 0, 0, 0 }, { level_width, level_height, 1 } },
+            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 },
+            .dstOffsets     = { { 0, 0, 0 }, { next_width, next_height, 1 } },
+        };
+        vkCmdBlitImage(command_buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+        level_width  = next_width;
+        level_height = next_height;
+    }
+
+    // All levels but the last were blit sources; the last was only written. The frame's
+    // draws are submitted after this, so the barriers cover them.
+    const VkPipelineStageFlags2 fragment = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    if (mip_levels > 1)
+    {
+        barrier(0, mip_levels - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                transfer, VK_ACCESS_2_TRANSFER_READ_BIT, fragment, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
+    barrier(mip_levels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, fragment, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+}
+
 void Native_Renderer::destroy_texture(Native_Texture *texture)
 {
     if (texture->view)   vkDestroyImageView(this->device, texture->view, nullptr);
@@ -1305,14 +1338,14 @@ void Native_Renderer::destroy_texture(Native_Texture *texture)
     *texture = {};
 }
 
-const Native_Texture *Native_Renderer::find_texture(const Texture &texture)
+const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Native_Renderer_Frame &frame)
 {
     if (!texture.pixels || texture.width == 0 || texture.height == 0) return &this->white_texture;
 
-    const Native_Texture *found = nullptr;
+    Native_Texture *found = nullptr;
     for (u32 i = 0; i < this->texture_count && !found; ++i)
     {
-        const Native_Texture &candidate = this->textures[i];
+        Native_Texture &candidate = this->textures[i];
         if (candidate.pixels == texture.pixels && candidate.width == texture.width && candidate.height == texture.height)
             found = &candidate;
     }
@@ -1330,14 +1363,16 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture)
         }
 
         // Kept even when it fails, so it isn't tried again every frame.
-        Native_Texture *created = &this->textures[this->texture_count++];
-        this->create_texture(texture.pixels, texture.width, texture.height, created);
-        if (!created->descriptor_set)
-            log_error("Could not upload a %ux%u texture: it's drawn white", texture.width, texture.height);
-        found = created;
+        found = &this->textures[this->texture_count++];
+        this->create_texture(texture.pixels, texture.width, texture.height, found);
+        if (!found->descriptor_set)
+            log_error("Could not create a %ux%u texture: it's drawn white", texture.width, texture.height);
     }
 
-    return found->descriptor_set ? found : &this->white_texture;
+    if (!found->descriptor_set) return &this->white_texture;
+
+    if (found->rows_uploaded < found->height) this->upload_texture(found, frame);
+    return found->rows_uploaded == found->height ? found : nullptr;
 }
 
 const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame)
@@ -1390,15 +1425,7 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
     memcpy(staged,                 mesh.vertices, vertices_size);
     memcpy(staged + indices_start, mesh.indices,  indices_size);
 
-    if (!frame.uploading)
-    {
-        VkCommandBufferBeginInfo begin_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        };
-        vkBeginCommandBuffer(frame.upload_command_buffer, &begin_info);
-        frame.uploading = true;
-    }
+    this->begin_uploads(frame);
 
     VkBufferCopy copy = {
         .srcOffset = frame.staging_used,

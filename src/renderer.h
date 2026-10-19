@@ -21,6 +21,8 @@ public:
     void draw_test_triangle();
     // Lit by a fixed directional light, depth-tested and back-face culled. Its color
     // is `color` times `texture` (white when it has no pixels), mipmapped and repeated.
+    // Nothing is drawn while the mesh or the texture is still on its way to the GPU,
+    // which can take a few frames after their first draw.
     void draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matrix4 &view_projection, const Vector4 &color,
                    const Texture &texture);
     void end_frame();
