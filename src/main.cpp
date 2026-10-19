@@ -6,6 +6,7 @@
 #include "key_value_file.h"
 #include "renderer.h"
 #include "game_library.h"
+#include "imgui_host.h"
 #include "png.h"
 #include "logger.h"
 
@@ -186,6 +187,8 @@ int main(int argc, char **argv)
     Input input;
     input.use_bindings(Key_Value_File::read("key_bindings.kvl"));
 
+    Imgui_Host imgui;
+
     // Allocated once, so the game's state outlives reloads of its code.
     Arena arena(GAME_PERMANENT_MEMORY_SIZE + GAME_TRANSIENT_MEMORY_SIZE + RENDER_COMMANDS_SIZE);
 
@@ -224,6 +227,10 @@ int main(int argc, char **argv)
         input.update(window.input_state);
 
         auto time = std::chrono::steady_clock::now();
+        r32  dt   = std::min(std::chrono::duration<r32>(time - previous_time).count(), MAX_FRAME_DT);
+        previous_time = time;
+
+        imgui.begin_frame(window, input, dt);
 
         render_commands.clear_color     = clear_color;
         render_commands.sky_background  = false;
@@ -235,15 +242,15 @@ int main(int argc, char **argv)
 
         Game_Frame frame = {};
         frame.input    = &input;
-        frame.dt       = std::min(std::chrono::duration<r32>(time - previous_time).count(), MAX_FRAME_DT);
+        frame.dt       = dt;
         frame.width    = window.framebuffer_width;
         frame.height   = window.framebuffer_height;
         frame.reloaded = reloaded;
         frame.render   = &render_commands;
-
-        previous_time = time;
+        frame.imgui    = imgui.context;
 
         game.update_and_render(&memory, &frame);
+        imgui.end_frame(&render_commands);
 
         if (frame.quit) window.closed = true;
 

@@ -18,5 +18,6 @@ Jump                Space MouseRight
 #---------------------------------------
 
 Quit                Escape
+ImGuiDemo           F1
 # The engine's: saves the frame to screenshots/<date>_<time>.png
 Screenshot          F12

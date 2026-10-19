@@ -4,6 +4,8 @@
 #include "input.h"
 #include "render_commands.h"
 
+struct ImGuiContext;
+
 // The interface between the engine and the game.
 //
 // The game is a shared library with one entry point, game_update_and_render(), which
@@ -19,8 +21,8 @@
 //     state needs a restart (or code that migrates the old state).
 //
 // The game doesn't call into the engine: it gets the input and returns render
-// commands. The engine code it uses (input queries, logging, math) is compiled into
-// the library.
+// commands. The engine code it uses (input queries, logging, math, Dear ImGui) is
+// compiled into the library; ImGui's state is the engine's (see imgui_host.h).
 
 struct Game_Memory
 {
@@ -42,6 +44,7 @@ struct Game_Frame
     u32              height;
     bool             reloaded; // The game's code was loaded or reloaded since the previous frame
     Render_Commands *render;   // Empty, with defaults for the frame's camera and lighting
+    ImGuiContext    *imgui;    // Dear ImGui's, in its frame, for tools: make it current first (see imgui_host.h)
 
     // Set by the game
     bool             quit;     // Closes the game after this frame
