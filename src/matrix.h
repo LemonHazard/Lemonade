@@ -164,3 +164,18 @@ inline Matrix4 perspective(float vertical_fov_radians, float aspect, float z_nea
     m.at(3, 2) = -1.0f;
     return m;
 }
+
+// Orthographic projection into Vulkan clip space, of the box from (left, bottom) to
+// (right, top) in view space, between distances `z_near` and `z_far` in front of
+// the camera (either can be negative): +Y down and depth from 0 (near) to 1 (far).
+inline Matrix4 orthographic(float left, float right, float bottom, float top, float z_near, float z_far)
+{
+    Matrix4 m = identity();
+    m.at(0, 0) = 2.0f / (right - left);
+    m.at(0, 3) = -(right + left) / (right - left);
+    m.at(1, 1) = -2.0f / (top - bottom);
+    m.at(1, 3) = (top + bottom) / (top - bottom);
+    m.at(2, 2) = -1.0f / (z_far - z_near);
+    m.at(2, 3) = -z_near / (z_far - z_near);
+    return m;
+}
