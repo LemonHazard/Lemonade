@@ -415,6 +415,10 @@ static u64 gltf_material(const Json &json, u64 index, const char *directory, Tex
     r32 strength = (float)source["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].number_or(1.0);
     material->emissive = gltf_read_color3(source["emissiveFactor"], {}) * strength;
 
+    const str &alpha_mode  = source["alphaMode"].string;
+    material->alpha_mode   = alpha_mode == "MASK" ? Alpha_Mode::Mask : alpha_mode == "BLEND" ? Alpha_Mode::Blend : Alpha_Mode::Opaque;
+    material->alpha_cutoff = (float)source["alphaCutoff"].number_or(0.5);
+
     u8 *at   = (u8 *)storage;
     u64 used = 0;
     used += gltf_load_texture(gltf_texture_uri(json, pbr["baseColorTexture"]), directory, textures,

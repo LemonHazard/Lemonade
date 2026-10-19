@@ -164,7 +164,7 @@ TEST_CASE("load_glb_from_memory puts each material's triangles in a part", "[glt
         R"({"mesh":0})", false, R"(,"material":1)",
         R"(,{"attributes":{"POSITION":0},"indices":1},{"attributes":{"POSITION":0},"indices":1,"material":1})",
         R"("materials":[{},{"pbrMetallicRoughness":{"baseColorFactor":[0.5,0.25,1,1],"metallicFactor":0.25,"roughnessFactor":0.75},)"
-        R"("normalTexture":{"index":0,"scale":0.5},"emissiveFactor":[1,0.5,0],)"
+        R"("normalTexture":{"index":0,"scale":0.5},"emissiveFactor":[1,0.5,0],"alphaMode":"MASK","alphaCutoff":0.25,)"
         R"("extensions":{"KHR_materials_emissive_strength":{"emissiveStrength":4}}}],)");
 
     alignas(4) u8 storage[512];
@@ -186,6 +186,8 @@ TEST_CASE("load_glb_from_memory puts each material's triangles in a part", "[glt
     REQUIRE(first.material.normal_scale == 0.5f);
     REQUIRE(first.material.emissive.x == 4.0f);
     REQUIRE(first.material.emissive.y == 2.0f);
+    REQUIRE(first.material.alpha_mode == Alpha_Mode::Mask);
+    REQUIRE(first.material.alpha_cutoff == 0.25f);
     REQUIRE(!first.material.normal_texture.pixels); // No library to load it with
 
     const Model_Part &second = model.parts[1];
@@ -210,6 +212,8 @@ TEST_CASE("load_glb_from_memory takes materials' factors from glTF's defaults", 
     REQUIRE(material.roughness == 1.0f);
     REQUIRE(material.normal_scale == 1.0f);
     REQUIRE(material.emissive.x == 0.0f);
+    REQUIRE(material.alpha_mode == Alpha_Mode::Opaque);
+    REQUIRE(material.alpha_cutoff == 0.5f);
 }
 
 TEST_CASE("load_glb_from_memory loads materials' textures through the library, once each", "[gltf]")

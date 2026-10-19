@@ -11,8 +11,8 @@
 // (computed when missing) and the first texture coordinates (0, 0 when missing), and
 // materials' factors (with KHR_materials_emissive_strength) and base color, normal and
 // emissive textures: PNG images, by file name relative to the .glb's folder, loaded
-// through `textures` (with none, materials get their factors only). Ignored are other
-// textures, samplers, texture transforms, alpha modes, animations and skins. A
+// through `textures` (with none, materials get their factors only), and alpha modes.
+// Ignored are other textures, samplers, texture transforms, animations and skins. A
 // primitive without a material gets plain_material() in white, not glTF's metallic
 // default. Data must be in the file's binary chunk: external buffers, sparse accessors
 // and quantized positions aren't supported.
