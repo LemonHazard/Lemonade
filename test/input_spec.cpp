@@ -873,3 +873,56 @@ TEST_CASE("Input text drops what doesn't fit in a frame", "[input][text]")
     REQUIRE(input.text_length == INPUT_MAX_TEXT);
     REQUIRE(input.text[INPUT_MAX_TEXT - 1] == 'a' + (INPUT_MAX_TEXT - 1) % 26);
 }
+
+//--------------------------------------------------------------------------------------
+// Enabled
+//--------------------------------------------------------------------------------------
+
+TEST_CASE("Input disabled reads every key and action as up", "[input][enabled]")
+{
+    Input       input;
+    Input_State state{};
+    input.bind("Jump", Key::Space);
+
+    {
+        Input_Spec_Frame frame(input, state);
+        state.set_key(Key::Space, true);
+        state.set_key(Key::MouseLeft, true);
+    }
+    input.enabled = false;
+    REQUIRE_FALSE(input.is_down(Key::Space));
+    REQUIRE_FALSE(input.was_pressed(Key::Space));
+    REQUIRE_FALSE(input.is_down(Key::MouseLeft));
+    REQUIRE_FALSE(input.is_down("Jump"));
+    REQUIRE_FALSE(input.was_pressed("Jump"));
+
+    input.enabled = true;
+    REQUIRE(input.is_down(Key::Space));
+    REQUIRE(input.was_pressed("Jump"));
+
+    input.enabled = false;
+    {
+        Input_Spec_Frame frame(input, state);
+        state.set_key(Key::Space, false);
+    }
+    REQUIRE(input.was_released(Key::Space));
+}
+
+TEST_CASE("Input is enabled again by the next update", "[input][enabled]")
+{
+    Input       input;
+    Input_State state{};
+
+    {
+        Input_Spec_Frame frame(input, state);
+        state.set_key(Key::A, true);
+    }
+    input.enabled = false;
+    REQUIRE_FALSE(input.is_down(Key::A));
+
+    {
+        Input_Spec_Frame frame(input, state);
+    }
+    REQUIRE(input.enabled);
+    REQUIRE(input.is_down(Key::A));
+}

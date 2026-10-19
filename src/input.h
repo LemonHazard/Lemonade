@@ -183,7 +183,7 @@ public:
     bool bind(const char *action, Key key);
     void clear_bindings();
 
-    // Call once per frame, after Window::read_input().
+    // Call once per frame, after Window::read_input(). Enables the input again.
     void update(const Input_State &state);
 
     bool is_down(const char *action) const;
@@ -203,6 +203,11 @@ public:
     r32  scroll_y      = 0.0f;
     u32  text[INPUT_MAX_TEXT] = {}; // Typed this frame, see Input_State::text
     u32  text_length   = 0;
+
+    // While false, keys, mouse buttons and actions all read as up: for when the frame's
+    // keys are someone else's, e.g. a text field's in the editor. Reset to true by
+    // update(), so it's for one frame. The mouse's position, scroll and text are still there.
+    bool enabled       = true;
 
 private:
     struct Action

@@ -346,6 +346,7 @@ void Input::update(const Input_State &new_state)
     this->scroll_x     = new_state.scroll_x;
     this->scroll_y     = new_state.scroll_y;
     this->text_length  = new_state.text_length;
+    this->enabled      = true;
     memcpy(this->text, new_state.text, new_state.text_length * sizeof(u32));
 
     // No delta across leaving and re-entering the window, where the position jumps.
@@ -365,7 +366,7 @@ const Input::Action *Input::find_action(const char *name) const
 
 bool Input::is_down(Key key) const
 {
-    return this->state.down[(u32)key];
+    return this->enabled && this->state.down[(u32)key];
 }
 
 // A transition count tells pressed from released even when both happened between two
@@ -373,6 +374,8 @@ bool Input::is_down(Key key) const
 // if it changed at least twice.
 bool Input::was_pressed(Key key) const
 {
+    if (!this->enabled) return false;
+
     u32 index = (u32)key;
     u8  count = this->state.transitions[index];
     return this->state.down[index] ? count >= 1 : count >= 2;
@@ -380,6 +383,8 @@ bool Input::was_pressed(Key key) const
 
 bool Input::was_released(Key key) const
 {
+    if (!this->enabled) return false;
+
     u32 index = (u32)key;
     u8  count = this->state.transitions[index];
     return this->state.down[index] ? count >= 2 : count >= 1;

@@ -38,7 +38,7 @@ struct Game_Memory
 struct Game_Frame
 {
     // Set by the engine
-    const Input     *input;
+    Input           *input;    // The game may disable it for the frame (see Input::enabled)
     r32              dt;       // Seconds since the previous frame, at most 0.1
     u32              width;    // Framebuffer size in pixels
     u32              height;
