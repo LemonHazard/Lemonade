@@ -122,6 +122,9 @@ constexpr u32 KEY_COUNT = (u32)Key::Count;
 Key key_from_name(const char *name);
 const char *key_name(Key key);
 
+// Characters typed in a frame past this many are dropped.
+constexpr u32 INPUT_MAX_TEXT = 64;
+
 // Raw input the window collects between two frames.
 struct Input_State
 {
@@ -140,14 +143,22 @@ struct Input_State
     r32  scroll_x;
     r32  scroll_y;
 
+    // Text typed since the last frame, as Unicode code points: what the keys make in
+    // the keyboard's layout, repeated while one is held, for text fields. Control
+    // characters (Enter, Tab, Backspace) aren't in it: they're keys.
+    u32  text[INPUT_MAX_TEXT];
+    u32  text_length;
+
     // Records a key going down or up. Ignores repeats of the same state and keeps
     // the either-side modifiers (Shift, Ctrl, Alt, Super) in sync.
     void set_key(Key key, bool is_down);
+    // Adds a typed character, unless it's a control character or the frame's text is full.
+    void add_text(u32 code_point);
     // Releases the keys or buttons that are down, e.g. when the window loses
     // keyboard focus or the pointer leaves it.
     void release_keyboard();
     void release_mouse_buttons();
-    // Starts a new frame: clears transitions and scroll.
+    // Starts a new frame: clears transitions, scroll and text.
     void begin_frame();
 };
 
@@ -190,6 +201,8 @@ public:
     bool mouse_inside  = false;
     r32  scroll_x      = 0.0f;
     r32  scroll_y      = 0.0f;
+    u32  text[INPUT_MAX_TEXT] = {}; // Typed this frame, see Input_State::text
+    u32  text_length   = 0;
 
 private:
     struct Action

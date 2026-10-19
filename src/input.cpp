@@ -246,11 +246,21 @@ void Input_State::release_mouse_buttons()
     input_state_release(*this, Key::MouseLeft, Key::MouseWheelY);
 }
 
+void Input_State::add_text(u32 code_point)
+{
+    bool control   = code_point < 0x20 || (code_point >= 0x7F && code_point < 0xA0);
+    bool surrogate = code_point >= 0xD800 && code_point <= 0xDFFF;
+    if (control || surrogate || code_point > 0x10FFFF || this->text_length == INPUT_MAX_TEXT) return;
+
+    this->text[this->text_length++] = code_point;
+}
+
 void Input_State::begin_frame()
 {
     memset(this->transitions, 0, sizeof(this->transitions));
-    this->scroll_x = 0.0f;
-    this->scroll_y = 0.0f;
+    this->scroll_x    = 0.0f;
+    this->scroll_y    = 0.0f;
+    this->text_length = 0;
 }
 
 //--------------------------------------------------------------------------------------
@@ -335,6 +345,8 @@ void Input::update(const Input_State &new_state)
     this->mouse_inside = new_state.mouse_inside;
     this->scroll_x     = new_state.scroll_x;
     this->scroll_y     = new_state.scroll_y;
+    this->text_length  = new_state.text_length;
+    memcpy(this->text, new_state.text, new_state.text_length * sizeof(u32));
 
     // No delta across leaving and re-entering the window, where the position jumps.
     bool tracking = was_inside && new_state.mouse_inside;

@@ -7,6 +7,9 @@
 #include <libdecor.h>
 #include <wayland-client.h>
 #include <wayland-cursor.h>
+#include <xkbcommon/xkbcommon.h>
+
+#include <chrono>
 
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
@@ -53,6 +56,10 @@ public:
     static void pointer_axis_value120(void *data, wl_pointer *pointer, u32 axis, i32 value120);
 
     void use_system_app_mode();
+    // Adds the text the key makes, in the keyboard's layout, to the window's input.
+    void type_key(u32 scancode);
+    // Types the held key again for each repeat that's due.
+    void repeat_key();
     bool apply_scale(Window *window);
     bool present_blank(u32 width, u32 height);
     void update_cursor();
@@ -82,6 +89,17 @@ public:
     u32          seat_version       = 0;
     wl_keyboard *keyboard           = nullptr;
     wl_pointer  *pointer            = nullptr;
+    // The keyboard's layout, from the compositor, and its modifiers' state: what keys
+    // type. Keys themselves are scancodes, the same in any layout.
+    xkb_context *xkb                = nullptr;
+    xkb_keymap  *keymap             = nullptr;
+    xkb_state   *keymap_state       = nullptr;
+    // Text repeats while its key is held, as the compositor says: after `delay`, `rate`
+    // times a second (none at 0). Keys don't repeat, only what they type.
+    i32          repeat_rate        = 25;
+    i32          repeat_delay       = 600;   // Milliseconds
+    u32          repeat_scancode    = 0;     // The key repeating, 0 for none
+    std::chrono::steady_clock::time_point repeat_next;
     u32          pointer_serial     = 0;     // of the last enter, for set_cursor
     bool         pointer_on_surface = false; // and not on a decoration
     // Scroll is reported per axis (0 = vertical, 1 = horizontal) and applied on

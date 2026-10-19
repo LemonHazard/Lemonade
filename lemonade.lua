@@ -165,7 +165,7 @@ function lemonade.engine(opts)
       filter "system:linux"
          includedirs { engine_path("modules/linux/*/include") }
          -- Link the runtime libraries by soname, so the -dev packages aren't needed
-         links { ":libwayland-client.so.0", ":libwayland-cursor.so.0", ":libdecor-0.so.0", "dl" }
+         links { ":libwayland-client.so.0", ":libwayland-cursor.so.0", ":libdecor-0.so.0", ":libxkbcommon.so.0", "dl" }
          unity.build {
             replaces      = { engine_path("src/**.cpp") },
             roots         = { engine_path("src/main.cpp") },

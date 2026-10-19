@@ -820,3 +820,56 @@ TEST_CASE("Input mouse buttons work as keys", "[input][mouse]")
     REQUIRE_FALSE(input.is_down(button));
     REQUIRE(input.was_released(button));
 }
+
+//--------------------------------------------------------------------------------------
+// Text
+//--------------------------------------------------------------------------------------
+
+TEST_CASE("Input text lasts one frame", "[input][text]")
+{
+    Input       input;
+    Input_State state{};
+
+    {
+        Input_Spec_Frame frame(input, state);
+        state.add_text('h');
+        state.add_text(0x00E9); // é
+        state.add_text(0x1F600);
+    }
+    REQUIRE(input.text_length == 3);
+    REQUIRE(input.text[0] == 'h');
+    REQUIRE(input.text[1] == 0x00E9);
+    REQUIRE(input.text[2] == 0x1F600);
+
+    {
+        Input_Spec_Frame frame(input, state);
+    }
+    REQUIRE(input.text_length == 0);
+}
+
+TEST_CASE("Input text leaves out control characters and what isn't Unicode", "[input][text]")
+{
+    Input       input;
+    Input_State state{};
+
+    {
+        Input_Spec_Frame frame(input, state);
+        u32 code_point = GENERATE(0x00u, 0x08u, 0x09u, 0x0Du, 0x1Bu, 0x7Fu, 0x9Fu, 0xD800u, 0xDFFFu, 0x110000u);
+        INFO(code_point);
+        state.add_text(code_point);
+    }
+    REQUIRE(input.text_length == 0);
+}
+
+TEST_CASE("Input text drops what doesn't fit in a frame", "[input][text]")
+{
+    Input       input;
+    Input_State state{};
+
+    {
+        Input_Spec_Frame frame(input, state);
+        for (u32 i = 0; i < INPUT_MAX_TEXT + 10; ++i) state.add_text('a' + i % 26);
+    }
+    REQUIRE(input.text_length == INPUT_MAX_TEXT);
+    REQUIRE(input.text[INPUT_MAX_TEXT - 1] == 'a' + (INPUT_MAX_TEXT - 1) % 26);
+}

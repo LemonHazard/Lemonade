@@ -268,6 +268,10 @@ Window::Window(const wstr &title, u32 width, u32 height)
         return;
     }
 
+    // For the keyboard's layout, which comes with the keyboard.
+    this->native->xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!this->native->xkb) log_warn("Could not create an xkb context: nothing can be typed");
+
     this->native->registry = wl_display_get_registry(this->native->display);
     wl_registry_add_listener(this->native->registry, &native_window_registry_listener, this->native);
     wl_display_roundtrip(this->native->display);
@@ -336,6 +340,9 @@ Window::~Window()
         if (this->native->seat_version >= WL_SEAT_RELEASE_SINCE_VERSION) wl_seat_release(this->native->seat);
         else wl_seat_destroy(this->native->seat);
     }
+    if (this->native->keymap_state) xkb_state_unref(this->native->keymap_state);
+    if (this->native->keymap)       xkb_keymap_unref(this->native->keymap);
+    if (this->native->xkb)          xkb_context_unref(this->native->xkb);
 
     if (this->native->frame)      libdecor_frame_unref(this->native->frame);
     if (this->native->decor)      libdecor_unref(this->native->decor);
@@ -386,6 +393,8 @@ void Window::read_input()
         log_error("Lost connection to the Wayland display");
         this->closed = true;
     }
+
+    this->native->repeat_key();
 }
 
 void Native_Window::registry_global(void *data, wl_registry *registry, u32 name, const char *interface, u32 version)
@@ -587,11 +596,38 @@ void Native_Window::seat_name(void *, wl_seat *, const char *)
 {
 }
 
-// Keys are mapped from scancodes, so the layout (keymap) isn't needed until there is
-// text input.
-void Native_Window::keyboard_keymap(void *, wl_keyboard *, u32, i32 fd, u32)
+// Keys are mapped from scancodes, so the layout (keymap) is only for text.
+void Native_Window::keyboard_keymap(void *data, wl_keyboard *, u32 format, i32 fd, u32 size)
 {
+    auto native = (Native_Window *)data;
+
+    xkb_keymap *keymap = nullptr;
+    if (format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 && native->xkb)
+    {
+        // Private: from version 7 on, the compositor may share the memory read-only.
+        void *text = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (text != MAP_FAILED)
+        {
+            keymap = xkb_keymap_new_from_string(native->xkb, (const char *)text, XKB_KEYMAP_FORMAT_TEXT_V1,
+                                                XKB_KEYMAP_COMPILE_NO_FLAGS);
+            munmap(text, size);
+        }
+    }
     close(fd);
+
+    xkb_state *state = keymap ? xkb_state_new(keymap) : nullptr;
+    if (!state)
+    {
+        if (keymap) xkb_keymap_unref(keymap);
+        log_warn("Could not read the keyboard's layout: nothing can be typed");
+        return;
+    }
+
+    if (native->keymap_state) xkb_state_unref(native->keymap_state);
+    if (native->keymap)       xkb_keymap_unref(native->keymap);
+    native->keymap          = keymap;
+    native->keymap_state    = state;
+    native->repeat_scancode = 0;
 }
 
 void Native_Window::keyboard_enter(void *, wl_keyboard *, u32, wl_surface *, wl_array *)
@@ -605,22 +641,66 @@ void Native_Window::keyboard_leave(void *data, wl_keyboard *, u32, wl_surface *)
     // No release events come after losing focus, so nothing stays stuck down.
     auto native = (Native_Window *)data;
     native->window->input_state.release_keyboard();
+    native->repeat_scancode = 0;
 }
 
 void Native_Window::keyboard_key(void *data, wl_keyboard *, u32, u32, u32 key, u32 state)
 {
+    auto native  = (Native_Window *)data;
+    bool pressed = state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    native->window->input_state.set_key(native_window_key_from_scancode(key), pressed);
+
+    if (!pressed)
+    {
+        if (key == native->repeat_scancode) native->repeat_scancode = 0;
+        return;
+    }
+
+    native->type_key(key);
+
+    // The last key pressed repeats, if its layout says it does (letters, not Shift).
+    if (native->keymap && native->repeat_rate > 0 && xkb_keymap_key_repeats(native->keymap, key + 8))
+    {
+        native->repeat_scancode = key;
+        native->repeat_next     = std::chrono::steady_clock::now() + std::chrono::milliseconds(native->repeat_delay);
+    }
+}
+
+void Native_Window::keyboard_modifiers(void *data, wl_keyboard *, u32, u32 depressed, u32 latched, u32 locked, u32 group)
+{
+    // Modifier keys also arrive as key events: this is for what they make keys type.
     auto native = (Native_Window *)data;
-    native->window->input_state.set_key(native_window_key_from_scancode(key),
-                                        state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    if (native->keymap_state) xkb_state_update_mask(native->keymap_state, depressed, latched, locked, 0, 0, group);
 }
 
-void Native_Window::keyboard_modifiers(void *, wl_keyboard *, u32, u32, u32, u32, u32)
+void Native_Window::keyboard_repeat_info(void *data, wl_keyboard *, i32 rate, i32 delay)
 {
-    // Modifier keys also arrive as key events.
+    auto native = (Native_Window *)data;
+    native->repeat_rate  = rate;
+    native->repeat_delay = delay;
+    if (rate <= 0) native->repeat_scancode = 0;
 }
 
-void Native_Window::keyboard_repeat_info(void *, wl_keyboard *, i32, i32)
+void Native_Window::type_key(u32 scancode)
 {
+    // xkb's keycodes are evdev scancodes plus 8, as in X11.
+    if (!this->keymap_state) return;
+    this->window->input_state.add_text(xkb_state_key_get_utf32(this->keymap_state, scancode + 8));
+}
+
+void Native_Window::repeat_key()
+{
+    if (!this->repeat_scancode || this->repeat_rate <= 0) return;
+
+    // A long frame (a debugger pause) types a few repeats, not all it missed.
+    auto now      = std::chrono::steady_clock::now();
+    auto interval = std::chrono::microseconds(1000000 / this->repeat_rate);
+    for (u32 i = 0; i < 8 && now >= this->repeat_next; ++i)
+    {
+        this->type_key(this->repeat_scancode);
+        this->repeat_next += interval;
+    }
+    if (now >= this->repeat_next) this->repeat_next = now + interval;
 }
 
 void Native_Window::pointer_enter(void *data, wl_pointer *, u32 serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
