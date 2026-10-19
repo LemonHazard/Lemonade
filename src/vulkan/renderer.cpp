@@ -110,6 +110,11 @@ public:
     // The GPU copy of a texture, made the first time it's drawn.
     const Native_Texture *find_texture(const Texture &texture);
     void destroy_swapchain_resources();
+    // Ends the frame's commands, submits and presents it. With `capture` the frame is
+    // also copied to capture_buffer: returns whether it was, so that waiting for the
+    // frame's fence leaves its pixels there.
+    bool finish_frame(bool capture);
+    bool record_capture(VkCommandBuffer command_buffer);
     VkShaderModule create_shader_module(const u32 *code, u64 size);
     // Returns UINT32_MAX when no memory type fits.
     u32  find_memory_type(u32 type_bits, VkMemoryPropertyFlags properties);
@@ -129,6 +134,7 @@ public:
     VkSwapchainKHR swapchain        = VK_NULL_HANDLE;
     VkExtent2D     swapchain_extent = {};
     bool           swapchain_dirty  = false;
+    bool           swapchain_readable = false; // Its images can be copied from, for captures
     u32            image_count      = 0;
     VkImage        images[MAX_SWAPCHAIN_IMAGES]          = {};
     VkImageView    image_views[MAX_SWAPCHAIN_IMAGES]     = {};
@@ -154,6 +160,15 @@ public:
     Native_Texture        white_texture;                       // For meshes drawn without one
     Native_Texture        textures[MAX_TEXTURES];
     u32                   texture_count      = 0;
+
+    // Frames read back for screenshots: copied to a host-visible buffer, then
+    // converted to RGBA in capture_pixels. Made for the first capture.
+    VkBuffer        capture_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory  capture_memory = VK_NULL_HANDLE;
+    u8             *capture_mapped = nullptr;
+    u64             capture_size   = 0;
+    VkExtent2D      capture_extent = {};
+    std::vector<u8> capture_pixels;
 
     Native_Renderer_Frame frames[FRAMES_IN_FLIGHT];
     u32  frame_index   = 0;
@@ -218,6 +233,9 @@ Renderer::~Renderer()
         if (n->texture_set_layout) vkDestroyDescriptorSetLayout(n->device, n->texture_set_layout, nullptr);
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
         if (n->upload_pool)        vkDestroyCommandPool(n->device, n->upload_pool, nullptr);
+
+        if (n->capture_buffer) vkDestroyBuffer(n->device, n->capture_buffer, nullptr);
+        if (n->capture_memory) vkFreeMemory(n->device, n->capture_memory, nullptr); // Unmaps it
 
         n->destroy_swapchain_resources();
         if (n->swapchain) vkDestroySwapchainKHR(n->device, n->swapchain, nullptr);
@@ -445,25 +463,63 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
 
 void Renderer::end_frame()
 {
+    this->native->finish_frame(false);
+}
+
+Texture Renderer::end_frame_and_capture()
+{
     Native_Renderer *n = this->native;
-    if (!n->frame_started) return;
-    n->frame_started = false;
+    if (!n->frame_started) return {};
 
     Native_Renderer_Frame &frame = n->frames[n->frame_index];
+    if (!n->finish_frame(true)) return {};
+
+    vkWaitForFences(n->device, 1, &frame.in_flight, VK_TRUE, UINT64_MAX);
+
+    // The swapchain's bytes, as displayed: BGRA or RGBA. Alpha is dropped by the
+    // compositor (the swapchain is opaque), so it's made opaque here too.
+    u32  width  = n->capture_extent.width;
+    u32  height = n->capture_extent.height;
+    bool bgra   = n->surface_format.format == VK_FORMAT_B8G8R8A8_SRGB ||
+                  n->surface_format.format == VK_FORMAT_B8G8R8A8_UNORM;
+
+    n->capture_pixels.resize(texture_storage_size(width, height));
+    const u8 *source = n->capture_mapped;
+    u8       *pixels = n->capture_pixels.data();
+    for (u64 i = 0, count = (u64)width * height; i < count; ++i, source += 4, pixels += 4)
+    {
+        pixels[0] = bgra ? source[2] : source[0];
+        pixels[1] = source[1];
+        pixels[2] = bgra ? source[0] : source[2];
+        pixels[3] = 255;
+    }
+
+    return { n->capture_pixels.data(), width, height };
+}
+
+bool Native_Renderer::finish_frame(bool capture)
+{
+    if (!this->frame_started) return false;
+    this->frame_started = false;
+
+    Native_Renderer_Frame &frame = this->frames[this->frame_index];
 
     vkCmdEndRendering(frame.command_buffer);
 
+    // A capture leaves the image laid out for its copy, after the copy's reads.
+    bool captured = capture && this->record_capture(frame.command_buffer);
+
     VkImageMemoryBarrier2 to_present = {
         .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .srcStageMask        = captured ? VK_PIPELINE_STAGE_2_COPY_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask       = captured ? (VkAccessFlags2)0 : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .dstStageMask        = VK_PIPELINE_STAGE_2_NONE,
         .dstAccessMask       = 0,
-        .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .oldLayout           = captured ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = n->images[n->image_index],
+        .image               = this->images[this->image_index],
         .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
     };
     VkDependencyInfo dependency = {
@@ -482,7 +538,7 @@ void Renderer::end_frame()
     };
     VkSemaphoreSubmitInfo signal_info = {
         .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = n->render_finished[n->image_index],
+        .semaphore = this->render_finished[this->image_index],
         .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
     VkCommandBufferSubmitInfo command_buffer_info = {
@@ -498,27 +554,115 @@ void Renderer::end_frame()
         .signalSemaphoreInfoCount = 1,
         .pSignalSemaphoreInfos    = &signal_info,
     };
-    vk_check(vkQueueSubmit2(n->queue, 1, &submit, frame.in_flight), "vkQueueSubmit2");
+    // Without the submit the fence is never signaled: there's nothing to wait for.
+    if (!vk_check(vkQueueSubmit2(this->queue, 1, &submit, frame.in_flight), "vkQueueSubmit2")) captured = false;
 
     VkPresentInfoKHR present = {
         .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores    = &n->render_finished[n->image_index],
+        .pWaitSemaphores    = &this->render_finished[this->image_index],
         .swapchainCount     = 1,
-        .pSwapchains        = &n->swapchain,
-        .pImageIndices      = &n->image_index,
+        .pSwapchains        = &this->swapchain,
+        .pImageIndices      = &this->image_index,
     };
-    VkResult result = vkQueuePresentKHR(n->queue, &present);
+    VkResult result = vkQueuePresentKHR(this->queue, &present);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
     {
-        n->swapchain_dirty = true;
+        this->swapchain_dirty = true;
     }
     else
     {
         vk_check(result, "vkQueuePresentKHR");
     }
 
-    n->frame_index = (n->frame_index + 1) % FRAMES_IN_FLIGHT;
+    this->frame_index = (this->frame_index + 1) % FRAMES_IN_FLIGHT;
+    return captured;
+}
+
+bool Native_Renderer::record_capture(VkCommandBuffer command_buffer)
+{
+    if (!this->swapchain_readable)
+    {
+        log_error("Can't capture the frame: the swapchain's images can't be copied from");
+        return false;
+    }
+
+    VkFormat format = this->surface_format.format;
+    if (format != VK_FORMAT_B8G8R8A8_SRGB && format != VK_FORMAT_B8G8R8A8_UNORM &&
+        format != VK_FORMAT_R8G8B8A8_SRGB && format != VK_FORMAT_R8G8B8A8_UNORM)
+    {
+        log_error("Can't capture the frame: its format (VkFormat %d) isn't 8-bit RGBA or BGRA", (int)format);
+        return false;
+    }
+
+    // The previous capture's frame was waited for, so its buffer is free.
+    u64 size = (u64)this->swapchain_extent.width * this->swapchain_extent.height * 4;
+    if (size != this->capture_size)
+    {
+        if (this->capture_buffer) vkDestroyBuffer(this->device, this->capture_buffer, nullptr);
+        if (this->capture_memory) vkFreeMemory(this->device, this->capture_memory, nullptr);
+        this->capture_buffer = VK_NULL_HANDLE;
+        this->capture_memory = VK_NULL_HANDLE;
+        this->capture_mapped = nullptr;
+        this->capture_size   = 0;
+
+        bool ok = this->create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      &this->capture_buffer, &this->capture_memory)
+               && vk_check(vkMapMemory(this->device, this->capture_memory, 0, VK_WHOLE_SIZE, 0,
+                                       (void **)&this->capture_mapped), "vkMapMemory");
+        if (!ok)
+        {
+            log_error("Can't capture the frame: no buffer to copy it to");
+            return false;
+        }
+        this->capture_size = size;
+    }
+    this->capture_extent = this->swapchain_extent;
+
+    VkImageMemoryBarrier2 to_copy = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstStageMask        = VK_PIPELINE_STAGE_2_COPY_BIT,
+        .dstAccessMask       = VK_ACCESS_2_TRANSFER_READ_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = this->images[this->image_index],
+        .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    VkDependencyInfo before = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &to_copy,
+    };
+    vkCmdPipelineBarrier2(command_buffer, &before);
+
+    VkBufferImageCopy copy = {
+        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageExtent      = { this->capture_extent.width, this->capture_extent.height, 1 },
+    };
+    vkCmdCopyImageToBuffer(command_buffer, this->images[this->image_index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           this->capture_buffer, 1, &copy);
+
+    // The fence alone doesn't make the copy's writes visible to the host.
+    VkMemoryBarrier2 to_host = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+        .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT,
+    };
+    VkDependencyInfo after = {
+        .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers    = &to_host,
+    };
+    vkCmdPipelineBarrier2(command_buffer, &after);
+
+    return true;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL Native_Renderer::debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -1353,6 +1497,11 @@ bool Native_Renderer::create_swapchain(u32 width, u32 height)
                                                         -capabilities.supportedCompositeAlpha); // lowest set bit
     }
 
+    // Copying from the images, for screenshots, is nearly always supported too.
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    this->swapchain_readable = capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (this->swapchain_readable) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
     VkSwapchainKHR old_swapchain = this->swapchain;
 
     VkSwapchainCreateInfoKHR info = {
@@ -1363,7 +1512,7 @@ bool Native_Renderer::create_swapchain(u32 width, u32 height)
         .imageColorSpace  = this->surface_format.colorSpace,
         .imageExtent      = extent,
         .imageArrayLayers = 1,
-        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageUsage       = usage,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = composite_alpha,

@@ -38,4 +38,9 @@ void Renderer::end_frame()
 {
 }
 
+Texture Renderer::end_frame_and_capture()
+{
+    return {};
+}
+
 #endif // RENDERER_NULL

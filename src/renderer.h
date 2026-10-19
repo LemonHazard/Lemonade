@@ -24,6 +24,11 @@ public:
     void draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matrix4 &view_projection, const Vector4 &color,
                    const Texture &texture);
     void end_frame();
+    // Ends the frame like end_frame(), then waits for the GPU to finish it and reads
+    // back what it drew, for screenshots: 8-bit RGBA, sRGB-encoded as displayed, rows
+    // from the top, in memory the renderer keeps until the next capture. Returns no
+    // pixels when the frame can't be read back (logged); it's presented all the same.
+    Texture end_frame_and_capture();
 
     Native_Renderer *native;
 };
