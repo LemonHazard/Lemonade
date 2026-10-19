@@ -46,17 +46,21 @@ struct Render_Commands
     u8  *buffer;
     u64  capacity;
     u64  used;
+    u32  dropped; // Commands that didn't fit this frame: the engine warns about them
 };
 
 // Reserves a command of `size` bytes, header included, and fills in the header.
-// Returns nullptr when the buffer is full: the command is dropped.
+// Returns nullptr when the buffer is full: the command is dropped and counted.
 inline Render_Command_Header *push_render_command(Render_Commands *commands, Render_Command_Type type, u32 size)
 {
     constexpr u64 alignment = alignof(std::max_align_t);
     u64 aligned_size = ((u64)size + alignment - 1) & ~(alignment - 1);
 
     if (commands->capacity - commands->used < aligned_size)
+    {
+        ++commands->dropped;
         return nullptr;
+    }
 
     auto *header = (Render_Command_Header *)(commands->buffer + commands->used);
     header->type = type;

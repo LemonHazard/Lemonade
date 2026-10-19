@@ -19,7 +19,7 @@ TEST_CASE("push_render_command appends aligned commands", "[render_commands]")
     REQUIRE(commands.used == first->size + second->size);
 }
 
-TEST_CASE("push_render_command drops commands that don't fit", "[render_commands]")
+TEST_CASE("push_render_command drops and counts commands that don't fit", "[render_commands]")
 {
     alignas(std::max_align_t) u8 buffer[2 * alignof(std::max_align_t)];
     Render_Commands commands = {};
@@ -29,6 +29,9 @@ TEST_CASE("push_render_command drops commands that don't fit", "[render_commands
     push_test_triangle(&commands);
     push_test_triangle(&commands);
 
+    REQUIRE(commands.dropped == 0);
     REQUIRE(push_render_command(&commands, Render_Command_Type::Test_Triangle, 1) == nullptr);
+    push_test_triangle(&commands);
     REQUIRE(commands.used == sizeof(buffer));
+    REQUIRE(commands.dropped == 2);
 }

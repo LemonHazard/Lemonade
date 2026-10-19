@@ -181,8 +181,9 @@ int main(int argc, char **argv)
 
     auto previous_time = std::chrono::steady_clock::now();
 
-    u64 frames_drawn = 0;
-    int exit_code    = 0;
+    u64  frames_drawn            = 0;
+    int  exit_code               = 0;
+    bool dropped_commands_logged = false; // Warned once, like the renderer's limits
 
     while (!window.closed)
     {
@@ -195,7 +196,8 @@ int main(int argc, char **argv)
 
         render_commands.clear_color     = clear_color;
         render_commands.view_projection = identity();
-        render_commands.used        = 0;
+        render_commands.used            = 0;
+        render_commands.dropped         = 0;
 
         Game_Frame frame = {};
         frame.input    = &input;
@@ -210,6 +212,13 @@ int main(int argc, char **argv)
         game.update_and_render(&memory, &frame);
 
         if (frame.quit) window.closed = true;
+
+        if (render_commands.dropped && !dropped_commands_logged)
+        {
+            log_warn("%u render commands didn't fit in the %llu KiB command buffer and weren't drawn",
+                     render_commands.dropped, (unsigned long long)(RENDER_COMMANDS_SIZE / KiB));
+            dropped_commands_logged = true;
+        }
 
         // The engine's own action, bound in key_bindings.kvl like the game's.
         bool screenshot_pressed = input.was_pressed("Screenshot");
