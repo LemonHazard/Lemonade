@@ -42,7 +42,10 @@ static_assert(MESH_SLOTS >= 2 * MAX_MESHES, "The mesh hash table needs empty slo
 // band of rows per frame; bigger meshes aren't drawn at all.
 constexpr u64 STAGING_BUFFER_SIZE  = 16 * MiB;
 // Textures stay on the GPU once drawn: past this many, meshes are drawn untextured.
-constexpr u32 MAX_TEXTURES         = 256;
+constexpr u32 MAX_TEXTURES         = 1024;
+constexpr u32 TEXTURE_SLOT_BITS    = 11; // The hash table has twice MAX_TEXTURES slots
+constexpr u32 TEXTURE_SLOTS        = 1u << TEXTURE_SLOT_BITS;
+static_assert(TEXTURE_SLOTS >= 2 * MAX_TEXTURES, "The texture hash table needs empty slots to end its probes");
 // Texture pixels are sRGB-encoded, so the shaders sample linear colors.
 constexpr VkFormat TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_SRGB;
 
@@ -80,7 +83,8 @@ struct Native_Mesh
 };
 
 // A texture on the GPU, with the descriptor set the mesh shaders sample it through.
-// No descriptor set means it couldn't be created: it's drawn white. Its pixels are
+// No pixels means the hash table slot is empty; no descriptor set means it couldn't be
+// created: it's drawn white. Its pixels are
 // copied over one or more frames, from the top row down; meshes are drawn with it once
 // they're all there.
 struct Native_Texture
@@ -202,7 +206,7 @@ public:
     VkDescriptorPool      texture_pool       = VK_NULL_HANDLE;
     VkSampler             sampler            = VK_NULL_HANDLE;
     Native_Texture        white_texture;                       // For meshes drawn without one
-    Native_Texture        textures[MAX_TEXTURES];
+    Native_Texture        textures[TEXTURE_SLOTS];             // Open addressing on the pixels' address
     u32                   texture_count      = 0;
 
     // Device-local vertices and indices of every mesh drawn so far, never freed.
@@ -230,6 +234,13 @@ public:
     bool meshes_full_logged   = false;
     bool textures_full_logged = false;
 };
+
+// Fibonacci hashing of an address into a table of 2^bits slots: the low bits are
+// alignment, always zero, so the multiply moves the varying ones to the top.
+static u32 hash_address(const void *address, u32 bits)
+{
+    return (u32)(((u64)(uintptr_t)address * 11400714819323198485ull) >> (64 - bits));
+}
 
 static bool vk_check(VkResult result, const char *what)
 {
@@ -279,7 +290,7 @@ Renderer::~Renderer()
         if (n->mesh_pipeline)        vkDestroyPipeline(n->device, n->mesh_pipeline, nullptr);
         if (n->mesh_pipeline_layout) vkDestroyPipelineLayout(n->device, n->mesh_pipeline_layout, nullptr);
 
-        for (u32 i = 0; i < n->texture_count; ++i) n->destroy_texture(&n->textures[i]);
+        for (auto &texture : n->textures) n->destroy_texture(&texture);
         n->destroy_texture(&n->white_texture);
         if (n->texture_pool)       vkDestroyDescriptorPool(n->device, n->texture_pool, nullptr); // Frees the sets
         if (n->texture_set_layout) vkDestroyDescriptorSetLayout(n->device, n->texture_set_layout, nullptr);
@@ -1342,14 +1353,21 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Nati
 {
     if (!texture.pixels || texture.width == 0 || texture.height == 0) return &this->white_texture;
 
+    u32 slot = hash_address(texture.pixels, TEXTURE_SLOT_BITS);
+
     Native_Texture *found = nullptr;
-    for (u32 i = 0; i < this->texture_count && !found; ++i)
+    for (;; slot = (slot + 1) & (TEXTURE_SLOTS - 1))
     {
-        Native_Texture &candidate = this->textures[i];
+        Native_Texture &candidate = this->textures[slot];
+        if (!candidate.pixels) break;
         if (candidate.pixels == texture.pixels && candidate.width == texture.width && candidate.height == texture.height)
+        {
             found = &candidate;
+            break;
+        }
     }
 
+    // Not created yet: it goes in the empty slot that ended the probe.
     if (!found)
     {
         if (this->texture_count == MAX_TEXTURES)
@@ -1363,7 +1381,8 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Nati
         }
 
         // Kept even when it fails, so it isn't tried again every frame.
-        found = &this->textures[this->texture_count++];
+        found = &this->textures[slot];
+        this->texture_count += 1;
         this->create_texture(texture.pixels, texture.width, texture.height, found);
         if (!found->descriptor_set)
             log_error("Could not create a %ux%u texture: it's drawn white", texture.width, texture.height);
@@ -1379,8 +1398,7 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
 {
     if (!mesh.vertices || !mesh.indices) return nullptr;
 
-    // Fibonacci hashing of the address: the low bits are alignment, always zero.
-    u32 slot = (u32)(((u64)(uintptr_t)mesh.vertices * 11400714819323198485ull) >> (64 - MESH_SLOT_BITS));
+    u32 slot = hash_address(mesh.vertices, MESH_SLOT_BITS);
 
     for (;; slot = (slot + 1) & (MESH_SLOTS - 1))
     {
