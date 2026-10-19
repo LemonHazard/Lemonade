@@ -1,0 +1,2 @@
+- Reloading while the Visual Studio debugger is attached will also need Casey’s unique-PDB-name trick, which isn’t in yet.
+- Mesh data gets copied to the GPU every frame. That’s fine for a few simple models; it will need changing once scenes get large.
