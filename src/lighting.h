@@ -15,9 +15,15 @@ struct Lighting
     Vector3 sky_color;     // Ambient light on surfaces facing up (+Y)
     Vector3 ground_color;  // Ambient light on surfaces facing down; blended in between
     r32     exposure;      // Scales all of the frame's light before it's tonemapped
+
+    // The sun casts shadows within this sphere, in world space, and nowhere else: a
+    // bigger one covers more of the scene with blurrier shadows. Its center can follow
+    // the camera or the player. A radius of 0 turns shadows off.
+    Vector3 shadow_center;
+    r32     shadow_radius;
 };
 
-// A sun up and to the right, behind a camera looking down -Z, and a dim sky.
+// A sun up and to the right, behind a camera looking down -Z, a dim sky, no shadows.
 inline Lighting default_lighting()
 {
     Lighting lighting;
@@ -26,5 +32,7 @@ inline Lighting default_lighting()
     lighting.sky_color     = { 0.18f, 0.18f, 0.18f };
     lighting.ground_color  = { 0.02f, 0.02f, 0.02f };
     lighting.exposure      = 1.0f;
+    lighting.shadow_center = {};
+    lighting.shadow_radius = 0.0f;
     return lighting;
 }

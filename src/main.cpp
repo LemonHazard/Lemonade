@@ -129,8 +129,7 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             case Render_Command_Type::Draw_Mesh:
             {
                 auto *command = (const Render_Command_Draw_Mesh *)header;
-                renderer.draw_mesh(command->mesh, command->transform, commands.view_projection, command->color,
-                                   command->texture);
+                renderer.draw_mesh(command->mesh, command->transform, command->color, command->texture);
                 break;
             }
         }
@@ -229,7 +228,7 @@ int main(int argc, char **argv)
         // The engine's own action, bound in key_bindings.kvl like the game's.
         bool screenshot_pressed = input.was_pressed("Screenshot");
 
-        if (renderer.begin_frame(render_commands.clear_color, render_commands.camera_position, render_commands.lighting))
+        if (renderer.begin_frame(render_commands))
         {
             draw(renderer, render_commands);
             ++frames_drawn;

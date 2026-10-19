@@ -21,7 +21,7 @@ Renderer::~Renderer()
     delete this->native;
 }
 
-bool Renderer::begin_frame(const Vector4 &, const Vector3 &, const Lighting &)
+bool Renderer::begin_frame(const Render_Commands &)
 {
     return false;
 }
@@ -30,7 +30,7 @@ void Renderer::draw_test_triangle()
 {
 }
 
-void Renderer::draw_mesh(const Mesh &, const Matrix4 &, const Matrix4 &, const Vector4 &, const Texture &)
+void Renderer::draw_mesh(const Mesh &, const Matrix4 &, const Vector4 &, const Texture &)
 {
 }
 

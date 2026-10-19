@@ -27,6 +27,9 @@ static const u32 mesh_vert_spv[] =
 static const u32 mesh_frag_spv[] =
 #include "mesh.frag.inc"
 ;
+static const u32 shadow_vert_spv[] =
+#include "shadow.vert.inc"
+;
 static const u32 tonemap_vert_spv[] =
 #include "tonemap.vert.inc"
 ;
@@ -57,15 +60,24 @@ constexpr VkFormat TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_SRGB;
 // The scene is rendered in linear colors that can go past 1, then tonemapped into the
 // swapchain. Every device can render to and sample this format.
 constexpr VkFormat HDR_FORMAT      = VK_FORMAT_R16G16B16A16_SFLOAT;
+// The sun's shadow map is this many texels across, spread over the shadows' sphere.
+constexpr u32 SHADOW_MAP_SIZE      = 2048;
+// Surfaces look themselves up in the shadow map this many texels off along their
+// normal, so they don't shadow themselves.
+constexpr r32 SHADOW_NORMAL_OFFSET = 2.0f;
 
-// Matches the uniform block in shaders/mesh.frag (std140: vec3s padded to vec4s).
+// Matches the uniform blocks in shaders/mesh.vert and mesh.frag (std140: vec3s padded
+// to vec4s).
 struct Frame_Uniforms
 {
+    Matrix4 view_projection;
+    Matrix4 light_view_projection; // World to the shadow map's clip space
     Vector4 camera_position;
-    Vector4 sun_direction; // Unit length
+    Vector4 sun_direction;         // Unit length
     Vector4 sun_color;
     Vector4 sky_color;
     Vector4 ground_color;
+    Vector4 shadow;                // 1 when on, the normal offset in world units, a texel in UV, unused
 };
 
 struct Native_Renderer_Frame
@@ -75,9 +87,13 @@ struct Native_Renderer_Frame
     VkSemaphore     image_acquired = VK_NULL_HANDLE;
     VkFence         in_flight      = VK_NULL_HANDLE;
 
+    // The frame's draws into the shadow map, recorded alongside command_buffer's and
+    // submitted before it, so that the shadows are there for its draws.
+    VkCommandBuffer shadow_command_buffer = VK_NULL_HANDLE;
+
     // Copies of the frame's new meshes to mesh_buffer and of its new textures' rows,
-    // submitted just before command_buffer: rendering has begun there, and copies
-    // can't go inside it.
+    // submitted before the frame's other commands: rendering has begun there, and
+    // copies can't go inside it.
     VkCommandBuffer upload_command_buffer = VK_NULL_HANDLE;
     bool            uploading             = false; // upload_command_buffer has begun
 
@@ -130,11 +146,17 @@ struct Native_Texture
 // Matches the push constant block in shaders/mesh.vert.
 struct Mesh_Push_Constants
 {
-    Matrix4 model_view_projection;
+    Matrix4 model;               // Model to world
     float   normal_matrix[3][4]; // mat3: three columns, each padded to a vec4
     Vector4 color;
 };
 static_assert(sizeof(Mesh_Push_Constants) == 128, "Vulkan guarantees only 128 bytes of push constants");
+
+// Matches the push constant block in shaders/shadow.vert.
+struct Shadow_Push_Constants
+{
+    Matrix4 model_light_view_projection;
+};
 
 // Matches the push constant block in shaders/tonemap.frag.
 struct Tonemap_Push_Constants
@@ -146,13 +168,15 @@ struct Pipeline_Description
 {
     const u32 *vertex_code;
     u64        vertex_size;
-    const u32 *fragment_code;
+    const u32 *fragment_code;  // None for depth only
     u64        fragment_size;
     const VkPipelineVertexInputStateCreateInfo *vertex_input;
     VkPipelineLayout layout;
-    VkFormat   color_format; // Of the attachments it renders into
-    VkFormat   depth_format; // VK_FORMAT_UNDEFINED for none
-    bool       depth_test;   // Also writes depth and culls back faces
+    VkFormat   color_format;   // Of the attachments it renders into, VK_FORMAT_UNDEFINED for none
+    VkFormat   depth_format;
+    bool       depth_test;     // Also writes depth
+    VkCullModeFlags cull_mode;
+    bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
 };
 
 class Native_Renderer
@@ -168,13 +192,15 @@ public:
     bool create_device();
     bool create_frames();
     bool create_texture_resources();
+    bool create_shadow_resources();
     bool create_frame_descriptors();
     bool create_pipelines();
     bool create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline);
     bool create_swapchain(u32 width, u32 height);
-    // An image sized like the swapchain to render into, with a view of it.
+    // An image to render into, with a view of it.
     bool create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
                            VkImage *image, VkDeviceMemory *memory, VkImageView *view);
+    void destroy_attachment(VkImage *image, VkDeviceMemory *memory, VkImageView *view);
     bool create_buffer(u64 size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                        VkBuffer *buffer, VkDeviceMemory *memory);
     // Creates the image and its descriptor set, without uploading anything. Leaves
@@ -201,6 +227,11 @@ public:
     // also copied to capture_buffer: returns whether it was, so that waiting for the
     // frame's fence leaves its pixels there.
     bool finish_frame(bool capture);
+    // Clears the shadow map and gets the shadow pipeline ready for draws. Every frame
+    // has the pass, so the map is always ready to be sampled, if only as all lit.
+    void begin_shadow_pass(VkCommandBuffer command_buffer);
+    // Leaves the shadow map ready to be sampled by the frame's draws.
+    void end_shadow_pass(VkCommandBuffer command_buffer);
     // Draws the scene's colors into the swapchain image, fitted to the display.
     void record_tonemap(VkCommandBuffer command_buffer);
     bool record_capture(VkCommandBuffer command_buffer);
@@ -219,6 +250,9 @@ public:
     u32                      queue_family    = 0;
     VkSurfaceFormatKHR       surface_format  = {};
     VkFormat                 depth_format    = VK_FORMAT_UNDEFINED;
+    VkFormat                 shadow_format   = VK_FORMAT_UNDEFINED; // Depth that can be sampled too
+    VkFilter                 shadow_filter   = VK_FILTER_NEAREST;   // Linear when shadow_format can be
+    bool                     depth_clamp     = false;               // The device feature, enabled when there
 
     VkSwapchainKHR swapchain        = VK_NULL_HANDLE;
     VkExtent2D     swapchain_extent = {};
@@ -240,10 +274,21 @@ public:
     VkDeviceMemory hdr_memory   = VK_NULL_HANDLE;
     VkImageView    hdr_view     = VK_NULL_HANDLE;
 
+    // The sun's view of the scene's depth, SHADOW_MAP_SIZE across: shared by the
+    // frames like the images above, but not sized like the swapchain.
+    VkImage        shadow_image   = VK_NULL_HANDLE;
+    VkDeviceMemory shadow_memory  = VK_NULL_HANDLE;
+    VkImageView    shadow_view    = VK_NULL_HANDLE;
+    VkSampler      shadow_sampler = VK_NULL_HANDLE; // Compares depths
+    bool           shadows_on     = false;          // This frame's
+    Matrix4        light_view_projection;           // This frame's
+
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
     VkPipelineLayout mesh_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       mesh_pipeline        = VK_NULL_HANDLE;
+    VkPipelineLayout shadow_pipeline_layout  = VK_NULL_HANDLE;
+    VkPipeline       shadow_pipeline         = VK_NULL_HANDLE;
     VkPipelineLayout tonemap_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       tonemap_pipeline        = VK_NULL_HANDLE;
     VkDescriptorSet  tonemap_set             = VK_NULL_HANDLE; // hdr_image, from frame_pool
@@ -314,6 +359,7 @@ Renderer::Renderer(Window &window)
            && this->native->create_device()
            && this->native->create_frames()
            && this->native->create_texture_resources()
+           && this->native->create_shadow_resources()
            && this->native->create_frame_descriptors()
            && this->native->create_pipelines();
 
@@ -339,6 +385,8 @@ Renderer::~Renderer()
         if (n->pipeline_layout)      vkDestroyPipelineLayout(n->device, n->pipeline_layout, nullptr);
         if (n->mesh_pipeline)        vkDestroyPipeline(n->device, n->mesh_pipeline, nullptr);
         if (n->mesh_pipeline_layout) vkDestroyPipelineLayout(n->device, n->mesh_pipeline_layout, nullptr);
+        if (n->shadow_pipeline)         vkDestroyPipeline(n->device, n->shadow_pipeline, nullptr);
+        if (n->shadow_pipeline_layout)  vkDestroyPipelineLayout(n->device, n->shadow_pipeline_layout, nullptr);
         if (n->tonemap_pipeline)        vkDestroyPipeline(n->device, n->tonemap_pipeline, nullptr);
         if (n->tonemap_pipeline_layout) vkDestroyPipelineLayout(n->device, n->tonemap_pipeline_layout, nullptr);
 
@@ -349,6 +397,9 @@ Renderer::~Renderer()
         if (n->frame_pool)         vkDestroyDescriptorPool(n->device, n->frame_pool, nullptr);
         if (n->frame_set_layout)   vkDestroyDescriptorSetLayout(n->device, n->frame_set_layout, nullptr);
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
+
+        n->destroy_attachment(&n->shadow_image, &n->shadow_memory, &n->shadow_view);
+        if (n->shadow_sampler) vkDestroySampler(n->device, n->shadow_sampler, nullptr);
 
         if (n->mesh_buffer) vkDestroyBuffer(n->device, n->mesh_buffer, nullptr);
         if (n->mesh_memory) vkFreeMemory(n->device, n->mesh_memory, nullptr);
@@ -389,9 +440,10 @@ Renderer::~Renderer()
     delete n;
 }
 
-bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_position, const Lighting &lighting)
+bool Renderer::begin_frame(const Render_Commands &commands)
 {
     Native_Renderer *n = this->native;
+    const Lighting  &lighting = commands.lighting;
     n->frame_started = false;
 
     if (!n->ready) return false;
@@ -429,14 +481,44 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
 
     vkResetFences(n->device, 1, &frame.in_flight);
 
-    auto to_vector4 = [](Vector3 v) { return Vector4{ v.x, v.y, v.z, 0.0f }; };
     Vector3 sun_direction = normalize(lighting.sun_direction);
+
+    // The shadow map looks along the sunlight at the shadows' sphere, from far enough
+    // to see all of it.
+    n->shadows_on            = lighting.shadow_radius > 0.0f;
+    n->light_view_projection = identity();
+    r32 shadow_texel         = 0.0f; // In world units
+    if (n->shadows_on)
+    {
+        r32 radius = lighting.shadow_radius;
+        shadow_texel = 2.0f * radius / (r32)SHADOW_MAP_SIZE;
+
+        // From the origin, so the view stays the same wherever the sphere is.
+        Vector3 up         = std::fabs(sun_direction.y) > 0.99f ? Vector3{ 0.0f, 0.0f, 1.0f } : Vector3{ 0.0f, 1.0f, 0.0f };
+        Matrix4 light_view = look_at({}, sun_direction * -1.0f, up);
+
+        // On whole texels, so that the shadows' edges don't crawl when the sphere moves.
+        Vector3 center = transform_point(light_view, lighting.shadow_center);
+        center.x = std::floor(center.x / shadow_texel) * shadow_texel;
+        center.y = std::floor(center.y / shadow_texel) * shadow_texel;
+
+        r32 distance = -center.z; // In front of the light, which looks down -Z
+        Matrix4 projection = orthographic(center.x - radius, center.x + radius, center.y - radius, center.y + radius,
+                                          distance - radius, distance + radius);
+        n->light_view_projection = projection * light_view;
+    }
+
+    auto to_vector4 = [](Vector3 v) { return Vector4{ v.x, v.y, v.z, 0.0f }; };
     *frame.uniform_mapped = {
-        .camera_position = to_vector4(camera_position),
-        .sun_direction   = to_vector4(sun_direction),
-        .sun_color       = to_vector4(lighting.sun_color),
-        .sky_color       = to_vector4(lighting.sky_color),
-        .ground_color    = to_vector4(lighting.ground_color),
+        .view_projection       = commands.view_projection,
+        .light_view_projection = n->light_view_projection,
+        .camera_position       = to_vector4(commands.camera_position),
+        .sun_direction         = to_vector4(sun_direction),
+        .sun_color             = to_vector4(lighting.sun_color),
+        .sky_color             = to_vector4(lighting.sky_color),
+        .ground_color          = to_vector4(lighting.ground_color),
+        .shadow                = { n->shadows_on ? 1.0f : 0.0f, SHADOW_NORMAL_OFFSET * shadow_texel,
+                                   1.0f / (r32)SHADOW_MAP_SIZE, 0.0f },
     };
     n->exposure = lighting.exposure;
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
@@ -447,6 +529,8 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
+    vkBeginCommandBuffer(frame.shadow_command_buffer, &begin_info);
+    n->begin_shadow_pass(frame.shadow_command_buffer);
     vkBeginCommandBuffer(frame.command_buffer, &begin_info);
 
     const VkPipelineStageFlags2 depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
@@ -495,7 +579,8 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = { .color = { { clear_color.r, clear_color.g, clear_color.b, clear_color.a } } },
+        .clearValue  = { .color = { { commands.clear_color.r, commands.clear_color.g, commands.clear_color.b,
+                                      commands.clear_color.a } } },
     };
     VkRenderingAttachmentInfo depth_attachment = {
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -541,8 +626,7 @@ void Renderer::draw_test_triangle()
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
 
-void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matrix4 &view_projection, const Vector4 &color,
-                         const Texture &texture)
+void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vector4 &color, const Texture &texture)
 {
     Native_Renderer *n = this->native;
     if (!n->frame_started || mesh.index_count == 0) return;
@@ -557,8 +641,8 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
     if (!native_texture) return;
 
     Mesh_Push_Constants push = {};
-    push.model_view_projection = view_projection * transform;
-    push.color                 = color;
+    push.model = transform;
+    push.color = color;
 
     Matrix4 normals = normal_matrix(transform);
     for (u32 column = 0; column < 3; ++column)
@@ -576,6 +660,17 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
     vkCmdPushConstants(command_buffer, n->mesh_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDrawIndexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
+
+    if (n->shadows_on)
+    {
+        Shadow_Push_Constants shadow_push = { n->light_view_projection * transform };
+        VkCommandBuffer shadow_command_buffer = frame.shadow_command_buffer;
+        vkCmdBindVertexBuffers(shadow_command_buffer, 0, 1, &n->mesh_buffer, &offset);
+        vkCmdBindIndexBuffer(shadow_command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
+        vkCmdPushConstants(shadow_command_buffer, n->shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
+                           0, sizeof(shadow_push), &shadow_push);
+        vkCmdDrawIndexed(shadow_command_buffer, mesh.index_count, 1, 0, 0, 0);
+    }
 }
 
 void Renderer::end_frame()
@@ -623,6 +718,8 @@ bool Native_Renderer::finish_frame(bool capture)
 
     vkCmdEndRendering(frame.command_buffer);
     this->record_tonemap(frame.command_buffer);
+    this->end_shadow_pass(frame.shadow_command_buffer);
+    vkEndCommandBuffer(frame.shadow_command_buffer);
 
     // A capture leaves the image laid out for its copy, after the copy's reads.
     bool captured = capture && this->record_capture(frame.command_buffer);
@@ -661,16 +758,17 @@ bool Native_Renderer::finish_frame(bool capture)
         .semaphore = this->render_finished[this->image_index],
         .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
-    // The uploads first, when there are any.
-    VkCommandBufferSubmitInfo command_buffer_infos[2] = {
+    // The uploads first, when there are any, then the shadows.
+    VkCommandBufferSubmitInfo command_buffer_infos[3] = {
         { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = frame.upload_command_buffer },
+        { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = frame.shadow_command_buffer },
         { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = frame.command_buffer },
     };
     VkSubmitInfo2 submit = {
         .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
         .waitSemaphoreInfoCount   = 1,
         .pWaitSemaphoreInfos      = &wait_info,
-        .commandBufferInfoCount   = frame.uploading ? 2u : 1u,
+        .commandBufferInfoCount   = frame.uploading ? 3u : 2u,
         .pCommandBufferInfos      = frame.uploading ? &command_buffer_infos[0] : &command_buffer_infos[1],
         .signalSemaphoreInfoCount = 1,
         .pSignalSemaphoreInfos    = &signal_info,
@@ -730,6 +828,88 @@ void Native_Renderer::end_uploads(Native_Renderer_Frame &frame)
     };
     vkCmdPipelineBarrier2(frame.upload_command_buffer, &dependency);
     vkEndCommandBuffer(frame.upload_command_buffer);
+}
+
+void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer)
+{
+    const VkPipelineStageFlags2 depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    // After the previous frame's draws sampled it.
+    VkImageMemoryBarrier2 to_attachment = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .srcAccessMask       = 0,
+        .dstStageMask        = depth_stages,
+        .dstAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout           = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = this->shadow_image,
+        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+    };
+    VkDependencyInfo dependency = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &to_attachment,
+    };
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+
+    VkRenderingAttachmentInfo depth_attachment = {
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = this->shadow_view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue  = { .depthStencil = { 1.0f, 0 } }, // Far: nothing casts a shadow
+    };
+    VkRenderingInfo rendering = {
+        .sType            = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea       = { { 0, 0 }, { SHADOW_MAP_SIZE, SHADOW_MAP_SIZE } },
+        .layerCount       = 1,
+        .pDepthAttachment = &depth_attachment,
+    };
+    vkCmdBeginRendering(command_buffer, &rendering);
+
+    VkViewport viewport = {
+        .x        = 0.0f,
+        .y        = 0.0f,
+        .width    = (float)SHADOW_MAP_SIZE,
+        .height   = (float)SHADOW_MAP_SIZE,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = { { 0, 0 }, { SHADOW_MAP_SIZE, SHADOW_MAP_SIZE } };
+    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->shadow_pipeline);
+}
+
+void Native_Renderer::end_shadow_pass(VkCommandBuffer command_buffer)
+{
+    vkCmdEndRendering(command_buffer);
+
+    // The frame's draws come after it in submission order.
+    VkImageMemoryBarrier2 to_sampled = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask        = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        .srcAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .dstAccessMask       = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = this->shadow_image,
+        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+    };
+    VkDependencyInfo dependency = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &to_sampled,
+    };
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
 }
 
 void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
@@ -1092,6 +1272,17 @@ bool Native_Renderer::pick_physical_device()
     if (depth_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
         this->depth_format = VK_FORMAT_D32_SFLOAT;
 
+    // The shadow map also needs sampling, which D16 always has; filtering its
+    // comparisons is up to the device.
+    const VkFormatFeatureFlags shadow_features = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    this->shadow_format = (depth_properties.optimalTilingFeatures & shadow_features) == shadow_features
+                        ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM;
+    VkFormatProperties shadow_properties;
+    vkGetPhysicalDeviceFormatProperties(this->physical_device, this->shadow_format, &shadow_properties);
+    if (shadow_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+        this->shadow_filter = VK_FILTER_LINEAR;
+
     return true;
 }
 
@@ -1111,11 +1302,23 @@ bool Native_Renderer::create_device()
         .dynamicRendering = VK_TRUE,
     };
 
+    // Depth clamping lets what's between the sun and the shadows' sphere cast shadows
+    // into it; nearly every desktop device has it.
+    VkPhysicalDeviceFeatures supported;
+    vkGetPhysicalDeviceFeatures(this->physical_device, &supported);
+    this->depth_clamp = supported.depthClamp;
+
+    VkPhysicalDeviceFeatures2 features = {
+        .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext    = &features13,
+        .features = { .depthClamp = this->depth_clamp },
+    };
+
     const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo info = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext                   = &features13,
+        .pNext                   = &features,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &queue_info,
         .enabledExtensionCount   = 1,
@@ -1146,6 +1349,7 @@ bool Native_Renderer::create_frames()
         };
         if (!vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &frame.command_buffer), "vkAllocateCommandBuffers")) return false;
         if (!vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &frame.upload_command_buffer), "vkAllocateCommandBuffers")) return false;
+        if (!vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &frame.shadow_command_buffer), "vkAllocateCommandBuffers")) return false;
 
         VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         if (!vk_check(vkCreateSemaphore(this->device, &semaphore_info, nullptr, &frame.image_acquired), "vkCreateSemaphore")) return false;
@@ -1288,18 +1492,50 @@ bool Native_Renderer::create_texture_resources()
     return ok;
 }
 
+bool Native_Renderer::create_shadow_resources()
+{
+    if (!this->create_attachment({ SHADOW_MAP_SIZE, SHADOW_MAP_SIZE }, this->shadow_format,
+                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                 VK_IMAGE_ASPECT_DEPTH_BIT, &this->shadow_image, &this->shadow_memory, &this->shadow_view))
+        return false;
+
+    // A sample is lit where its reference depth is at most the map's. Off the map it
+    // reads the border's depth, the farthest: lit.
+    VkSamplerCreateInfo sampler_info = {
+        .sType         = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter     = this->shadow_filter,
+        .minFilter     = this->shadow_filter,
+        .mipmapMode    = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .compareEnable = VK_TRUE,
+        .compareOp     = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .borderColor   = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+    };
+    return vk_check(vkCreateSampler(this->device, &sampler_info, nullptr, &this->shadow_sampler), "vkCreateSampler");
+}
+
 bool Native_Renderer::create_frame_descriptors()
 {
-    VkDescriptorSetLayoutBinding binding = {
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {
+            .binding         = 0, // Frame_Uniforms
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding         = 1, // The shadow map
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
     };
     VkDescriptorSetLayoutCreateInfo layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &binding,
+        .bindingCount = 2,
+        .pBindings    = bindings,
     };
     if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->frame_set_layout),
                   "vkCreateDescriptorSetLayout")) return false;
@@ -1307,7 +1543,7 @@ bool Native_Renderer::create_frame_descriptors()
     // A set per frame, and the tonemapping's.
     VkDescriptorPoolSize pool_sizes[2] = {
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         .descriptorCount = FRAMES_IN_FLIGHT },
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = FRAMES_IN_FLIGHT + 1 },
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1334,15 +1570,30 @@ bool Native_Renderer::create_frame_descriptors()
             .offset = 0,
             .range  = sizeof(Frame_Uniforms),
         };
-        VkWriteDescriptorSet write = {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = frame.descriptor_set,
-            .dstBinding      = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &buffer_descriptor,
+        VkDescriptorImageInfo shadow_descriptor = {
+            .sampler     = this->shadow_sampler,
+            .imageView   = this->shadow_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
-        vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
+        VkWriteDescriptorSet writes[2] = {
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.descriptor_set,
+                .dstBinding      = 0,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &buffer_descriptor,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.descriptor_set,
+                .dstBinding      = 1,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &shadow_descriptor,
+            },
+        };
+        vkUpdateDescriptorSets(this->device, 2, writes, 0, nullptr);
     }
 
     // Like a texture's, but of hdr_image: written by create_swapchain(), which makes it.
@@ -1708,6 +1959,7 @@ bool Native_Renderer::create_pipelines()
         .color_format  = HDR_FORMAT,
         .depth_format  = this->depth_format,
         .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
     };
     if (!this->create_graphics_pipeline(triangle, &this->pipeline)) return false;
 
@@ -1736,6 +1988,7 @@ bool Native_Renderer::create_pipelines()
         .color_format  = this->surface_format.format,
         .depth_format  = VK_FORMAT_UNDEFINED,
         .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
     };
     if (!this->create_graphics_pipeline(tonemap, &this->tonemap_pipeline)) return false;
 
@@ -1782,17 +2035,57 @@ bool Native_Renderer::create_pipelines()
         .color_format  = HDR_FORMAT,
         .depth_format  = this->depth_format,
         .depth_test    = true,
+        .cull_mode     = VK_CULL_MODE_BACK_BIT,
     };
-    return this->create_graphics_pipeline(mesh, &this->mesh_pipeline);
+    if (!this->create_graphics_pipeline(mesh, &this->mesh_pipeline)) return false;
+
+    // Meshes' positions alone, from the same vertices.
+    VkPushConstantRange shadow_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset     = 0,
+        .size       = sizeof(Shadow_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo shadow_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &shadow_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &shadow_layout_info, nullptr, &this->shadow_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    VkPipelineVertexInputStateCreateInfo shadow_vertex_input = {
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = 1,
+        .pVertexBindingDescriptions      = &binding,
+        .vertexAttributeDescriptionCount = 1,
+        .pVertexAttributeDescriptions    = &attributes[0],
+    };
+    // Both sides cast shadows, so open meshes (a plane for a leaf) do too.
+    Pipeline_Description shadow = {
+        .vertex_code   = shadow_vert_spv,
+        .vertex_size   = sizeof(shadow_vert_spv),
+        .vertex_input  = &shadow_vertex_input,
+        .layout        = this->shadow_pipeline_layout,
+        .color_format  = VK_FORMAT_UNDEFINED,
+        .depth_format  = this->shadow_format,
+        .depth_test    = true,
+        .cull_mode     = VK_CULL_MODE_NONE,
+        .shadow_caster = true,
+    };
+    return this->create_graphics_pipeline(shadow, &this->shadow_pipeline);
 }
 
 bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline)
 {
+    bool has_fragment = description.fragment_code != nullptr;
+    bool has_color    = description.color_format != VK_FORMAT_UNDEFINED;
+
     VkShaderModule vertex   = this->create_shader_module(description.vertex_code, description.vertex_size);
-    VkShaderModule fragment = this->create_shader_module(description.fragment_code, description.fragment_size);
+    VkShaderModule fragment = has_fragment ? this->create_shader_module(description.fragment_code, description.fragment_size)
+                                           : VK_NULL_HANDLE;
 
     bool ok = false;
-    if (vertex && fragment)
+    if (vertex && (fragment || !has_fragment))
     {
         VkPipelineShaderStageCreateInfo stages[2] = {
             {
@@ -1820,12 +2113,17 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         };
         // Meshes are counter-clockwise from the front (see mesh.h); perspective()
         // flips Y, which keeps them counter-clockwise in Vulkan's framebuffer space.
+        // Shadow casters' depth is pushed back more where it changes faster across
+        // a texel, so that sloped surfaces don't shadow themselves.
         VkPipelineRasterizationStateCreateInfo rasterization = {
-            .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            .polygonMode = VK_POLYGON_MODE_FILL,
-            .cullMode    = description.depth_test ? (VkCullModeFlags)VK_CULL_MODE_BACK_BIT : (VkCullModeFlags)VK_CULL_MODE_NONE,
-            .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .lineWidth   = 1.0f,
+            .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .depthClampEnable        = description.shadow_caster && this->depth_clamp,
+            .polygonMode             = VK_POLYGON_MODE_FILL,
+            .cullMode                = description.cull_mode,
+            .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable         = description.shadow_caster,
+            .depthBiasSlopeFactor    = description.shadow_caster ? 1.5f : 0.0f,
+            .lineWidth               = 1.0f,
         };
         VkPipelineMultisampleStateCreateInfo multisample = {
             .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -1843,7 +2141,7 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         };
         VkPipelineColorBlendStateCreateInfo blend = {
             .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-            .attachmentCount = 1,
+            .attachmentCount = has_color ? 1u : 0u,
             .pAttachments    = &blend_attachment,
         };
         VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
@@ -1854,7 +2152,7 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         };
         VkPipelineRenderingCreateInfo rendering = {
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-            .colorAttachmentCount    = 1,
+            .colorAttachmentCount    = has_color ? 1u : 0u,
             .pColorAttachmentFormats = &description.color_format,
             .depthAttachmentFormat   = description.depth_format,
         };
@@ -1862,7 +2160,7 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         VkGraphicsPipelineCreateInfo info = {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &rendering,
-            .stageCount          = 2,
+            .stageCount          = has_fragment ? 2u : 1u,
             .pStages             = stages,
             .pVertexInputState   = description.vertex_input,
             .pInputAssemblyState = &input_assembly,
@@ -2039,6 +2337,16 @@ bool Native_Renderer::create_attachment(VkExtent2D extent, VkFormat format, VkIm
     return vk_check(vkCreateImageView(this->device, &view_info, nullptr, view), "vkCreateImageView");
 }
 
+void Native_Renderer::destroy_attachment(VkImage *image, VkDeviceMemory *memory, VkImageView *view)
+{
+    if (*view)   vkDestroyImageView(this->device, *view, nullptr);
+    if (*image)  vkDestroyImage(this->device, *image, nullptr);
+    if (*memory) vkFreeMemory(this->device, *memory, nullptr);
+    *view   = VK_NULL_HANDLE;
+    *image  = VK_NULL_HANDLE;
+    *memory = VK_NULL_HANDLE;
+}
+
 void Native_Renderer::destroy_swapchain_resources()
 {
     for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i)
@@ -2051,17 +2359,8 @@ void Native_Renderer::destroy_swapchain_resources()
     }
     this->image_count = 0;
 
-    auto destroy_attachment = [this](VkImage *image, VkDeviceMemory *memory, VkImageView *view)
-    {
-        if (*view)   vkDestroyImageView(this->device, *view, nullptr);
-        if (*image)  vkDestroyImage(this->device, *image, nullptr);
-        if (*memory) vkFreeMemory(this->device, *memory, nullptr);
-        *view   = VK_NULL_HANDLE;
-        *image  = VK_NULL_HANDLE;
-        *memory = VK_NULL_HANDLE;
-    };
-    destroy_attachment(&this->depth_image, &this->depth_memory, &this->depth_view);
-    destroy_attachment(&this->hdr_image, &this->hdr_memory, &this->hdr_view);
+    this->destroy_attachment(&this->depth_image, &this->depth_memory, &this->depth_view);
+    this->destroy_attachment(&this->hdr_image, &this->hdr_memory, &this->hdr_view);
 }
 
 #endif // RENDERER_VULKAN
