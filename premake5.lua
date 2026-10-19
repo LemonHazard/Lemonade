@@ -35,6 +35,7 @@ project "Engine_Spec"
       includedirs {
          "src",
          "modules/common/catch2/include",
+         "modules/common/stb/include",
       }
       libdirs {
          "modules/windows/catch2/lib",
@@ -52,6 +53,7 @@ project "Engine_Spec"
             "$(inherited)",
             "src",
             "modules/common/catch2/include",
+            "modules/common/stb/include",
         }
       }
       -- includedirs {
@@ -68,6 +70,7 @@ project "Engine_Spec"
       includedirs {
          "src",
          "modules/common/catch2/include",
+         "modules/common/stb/include",
       }
       libdirs {
          "modules/linux/catch2/lib",

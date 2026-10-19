@@ -56,6 +56,7 @@ local GAME_ENGINE_SOURCES = {
    engine_path("src/input.cpp"),
    engine_path("src/json.cpp"),
    engine_path("src/gltf.cpp"),
+   engine_path("src/png.cpp"),
 }
 
 -- Settings the engine and the game share.
@@ -177,7 +178,7 @@ function lemonade.game(opts)
          path.join(opts.dir, "**.cpp"),
       }
 
-      includedirs { opts.dir, engine_path("src") }
+      includedirs { opts.dir, engine_path("src"), engine_path("modules/common/stb/include") }
 
       -- The engine doesn't load the library while the lock file exists: the linker
       -- may not be done writing it.
