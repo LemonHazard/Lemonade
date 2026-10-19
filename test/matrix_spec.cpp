@@ -29,3 +29,20 @@ TEST_CASE("orthographic takes a near plane behind the camera", "[matrix]")
     REQUIRE(transform_point(m, { 0.0f, 0.0f,  0.0f }).z == Approx(0.5f));
     REQUIRE(transform_point(m, { 0.0f, 0.0f, -3.0f }).z == Approx(1.0f));
 }
+
+TEST_CASE("inverse undoes a camera's view and projection", "[matrix]")
+{
+    Matrix4 m = perspective(0.9f, 1.5f, 0.1f, 100.0f) * look_at({ 3.0f, 4.0f, 5.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
+    Matrix4 product = inverse(m) * m;
+
+    for (u32 row = 0; row < 4; ++row)
+        for (u32 column = 0; column < 4; ++column)
+            REQUIRE(product.at(row, column) == Approx(row == column ? 1.0f : 0.0f).margin(1e-4));
+}
+
+TEST_CASE("inverse leaves matrices without one as they are", "[matrix]")
+{
+    Matrix4 flat = scaling({ 1.0f, 0.0f, 1.0f });
+    REQUIRE(inverse(flat).at(0, 0) == 1.0f);
+    REQUIRE(inverse(flat).at(1, 1) == 0.0f);
+}
