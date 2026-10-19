@@ -59,6 +59,8 @@ local GAME_ENGINE_SOURCES = {
    engine_path("src/png.cpp"),
 }
 
+local IMGUI_DIR = engine_path("modules/common/imgui")
+
 -- Settings the engine and the game share.
 local function defaults()
    location "."
@@ -92,11 +94,41 @@ local function defaults()
    filter {}
 end
 
+-- Dear ImGui, for the game's tools (see src/imgui_host.h). The engine and the game both
+-- link it, so it's a library of its own: built once, not again with every rebuild of
+-- the game. Made with the workspace's first engine or game project.
+local imgui_made = false
+local function imgui_library()
+   if imgui_made then return end
+   imgui_made = true
+
+   project "ImGui"
+      kind "StaticLib"
+      defaults()
+      -- Linked into the game library too, where it stays out of the exported symbols.
+      pic "On"
+      visibility "Hidden"
+
+      files {
+         path.join(IMGUI_DIR, "include/*.h"),
+         path.join(IMGUI_DIR, "src/*.cpp"),
+      }
+      includedirs { path.join(IMGUI_DIR, "include") }
+
+      -- As for the game library, which this goes into (see lemonade.game).
+      filter { "system:linux", "toolset:gcc" }
+         buildoptions { "-fno-gnu-unique" }
+
+      filter {}
+end
+
 -- The engine executable. opts:
 --   name   project and executable name
 --   game   the game library's project name (see lemonade.game)
 --   title  window title (default: name)
 function lemonade.engine(opts)
+   imgui_library()
+
    project(opts.name)
       kind "WindowedApp"
       dpiawareness "HighPerMonitor"
@@ -111,7 +143,8 @@ function lemonade.engine(opts)
       }
 
       -- png.cpp decodes with stb_image
-      includedirs { engine_path("modules/common/stb/include") }
+      includedirs { engine_path("modules/common/stb/include"), path.join(IMGUI_DIR, "include") }
+      links { "ImGui" }
 
       defines {
          "RENDERER_" .. renderer:upper(),
@@ -127,7 +160,7 @@ function lemonade.engine(opts)
             engine_path("modules/windows/*/lib"),
             "$(DXSDK_DIR)/Lib/x64",
          }
-         links { "d3d11", "d3dcompiler", "dxgi", "imgui" }
+         links { "d3d11", "d3dcompiler", "dxgi" }
 
       filter "system:linux"
          includedirs { engine_path("modules/linux/*/include") }
@@ -169,6 +202,8 @@ end
 --   roots  the sources the unity build starts from (globs allowed); the others are
 --          found by following their includes
 function lemonade.game(opts)
+   imgui_library()
+
    project(opts.name)
       kind "SharedLib"
       defaults()
@@ -181,7 +216,8 @@ function lemonade.game(opts)
          path.join(opts.dir, "**.cpp"),
       }
 
-      includedirs { opts.dir, engine_path("src"), engine_path("modules/common/stb/include") }
+      includedirs { opts.dir, engine_path("src"), engine_path("modules/common/stb/include"), path.join(IMGUI_DIR, "include") }
+      links { "ImGui" }
 
       -- The engine doesn't load the library while the lock file exists: the linker
       -- may not be done writing it.
