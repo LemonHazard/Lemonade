@@ -1,10 +1,12 @@
 #include "gltf.h"
 #include "json.h"
 #include "matrix.h"
+#include "png.h"
 #include "logger.h"
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // The .glb container: a 12-byte header, then chunks of (length, type, data), the
@@ -24,6 +26,16 @@ constexpr u32 GLTF_FLOAT          = 5126;
 
 constexpr u32 GLTF_MODE_TRIANGLES = 4;
 
+// A primitive without a material.
+constexpr u64 GLTF_NO_MATERIAL = UINT64_MAX;
+
+// The indices of one material's primitives, which become a part of the model.
+struct Gltf_Part
+{
+    u64              material; // Index in the file, or GLTF_NO_MATERIAL
+    std::vector<u32> indices;
+};
+
 struct Gltf_Loader
 {
     const Json *json;
@@ -31,8 +43,20 @@ struct Gltf_Loader
     u64         bin_size;
 
     std::vector<Mesh_Vertex> vertices;
-    std::vector<u32>         indices;
+    std::vector<Gltf_Part>   parts; // In the order their materials first appear
 };
+
+// The part for a material's primitives, made when it first appears.
+static Gltf_Part &gltf_part(Gltf_Loader *loader, u64 material)
+{
+    for (Gltf_Part &part : loader->parts)
+    {
+        if (part.material == material) return part;
+    }
+    Gltf_Part &part = loader->parts.emplace_back();
+    part.material = material;
+    return part;
+}
 
 // An accessor's data in the binary chunk: `count` elements of `components` values
 // of `component_type`, `stride` bytes apart.
@@ -271,7 +295,8 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
         vertex.uv       = has_uvs ? gltf_read_uv(uvs, i) : Vector2 { 0.0f, 0.0f };
     }
 
-    u64 first_index = loader->indices.size();
+    std::vector<u32> &part_indices = gltf_part(loader, gltf_integer_or(primitive["material"], GLTF_NO_MATERIAL)).indices;
+    u64 first_index = part_indices.size();
 
     if (!primitive["indices"].is_null())
     {
@@ -297,30 +322,30 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
                 log_error("glTF: index %u is past the primitive's %llu vertices", index, (unsigned long long)positions.count);
                 return false;
             }
-            loader->indices.push_back((u32)base + index);
+            part_indices.push_back((u32)base + index);
         }
     }
     else
     {
         for (u64 i = 0; i < positions.count / 3 * 3; ++i)
-            loader->indices.push_back((u32)(base + i));
+            part_indices.push_back((u32)(base + i));
     }
 
     // A mirroring transform turns the triangles inside out: swap two corners back.
     if (determinant3x3(transform) < 0.0f)
     {
-        for (u64 i = first_index; i + 2 < loader->indices.size(); i += 3)
-            std::swap(loader->indices[i + 1], loader->indices[i + 2]);
+        for (u64 i = first_index; i + 2 < part_indices.size(); i += 3)
+            std::swap(part_indices[i + 1], part_indices[i + 2]);
     }
 
     // Without normals, each vertex gets the average of its triangles' facing.
     if (!has_normals)
     {
-        for (u64 i = first_index; i + 2 < loader->indices.size(); i += 3)
+        for (u64 i = first_index; i + 2 < part_indices.size(); i += 3)
         {
-            Mesh_Vertex &a = loader->vertices[loader->indices[i]];
-            Mesh_Vertex &b = loader->vertices[loader->indices[i + 1]];
-            Mesh_Vertex &c = loader->vertices[loader->indices[i + 2]];
+            Mesh_Vertex &a = loader->vertices[part_indices[i]];
+            Mesh_Vertex &b = loader->vertices[part_indices[i + 1]];
+            Mesh_Vertex &c = loader->vertices[part_indices[i + 2]];
 
             Vector3 face = cross(b.position - a.position, c.position - a.position);
             a.normal += face;
@@ -332,6 +357,73 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
     }
 
     return true;
+}
+
+static Vector3 gltf_read_color3(const Json &color, Vector3 fallback)
+{
+    return color.size() == 3 ? Vector3 { (float)color[0].number_or(0.0), (float)color[1].number_or(0.0), (float)color[2].number_or(0.0) }
+                             : fallback;
+}
+
+// The image file a textureInfo's texture shows, "" for none.
+static const str &gltf_texture_uri(const Json &json, const Json &texture_info)
+{
+    static const str none;
+    if (texture_info.is_null()) return none;
+
+    const Json &texture = json["textures"][gltf_integer_or(texture_info["index"], UINT64_MAX)];
+    const Json &image   = json["images"][gltf_integer_or(texture["source"], UINT64_MAX)];
+    if (image["uri"].string.empty())
+    {
+        log_warn("glTF: skipping a texture whose image isn't a file next to the model");
+        return none;
+    }
+    return image["uri"].string;
+}
+
+// A texture of the material: the image at `uri`, through the library. Returns the
+// storage it took.
+static u64 gltf_load_texture(const str &uri, const char *directory, Texture_Library *textures, Texture *texture,
+                             void *storage, u64 storage_size)
+{
+    *texture = {};
+    if (uri.empty() || !textures) return 0;
+
+    std::string path = directory[0] ? std::string(directory) + "/" + uri : std::string(uri);
+    return library_texture(textures, path.c_str(), texture, storage, storage_size);
+}
+
+// The material at `index` in the file, its textures loaded into `storage`. Returns the
+// storage they took.
+static u64 gltf_material(const Json &json, u64 index, const char *directory, Texture_Library *textures,
+                         Material *material, void *storage, u64 storage_size)
+{
+    *material = plain_material({ 1.0f, 1.0f, 1.0f, 1.0f });
+    if (index == GLTF_NO_MATERIAL) return 0;
+
+    const Json &source = json["materials"][index];
+    const Json &pbr    = source["pbrMetallicRoughness"];
+    const Json &color  = pbr["baseColorFactor"];
+    if (color.size() == 4)
+    {
+        material->base_color = { (float)color[0].number_or(1.0), (float)color[1].number_or(1.0),
+                                 (float)color[2].number_or(1.0), (float)color[3].number_or(1.0) };
+    }
+    material->metallic     = (float)pbr["metallicFactor"].number_or(1.0);
+    material->roughness    = (float)pbr["roughnessFactor"].number_or(1.0);
+    material->normal_scale = (float)source["normalTexture"]["scale"].number_or(1.0);
+    r32 strength = (float)source["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].number_or(1.0);
+    material->emissive = gltf_read_color3(source["emissiveFactor"], {}) * strength;
+
+    u8 *at   = (u8 *)storage;
+    u64 used = 0;
+    used += gltf_load_texture(gltf_texture_uri(json, pbr["baseColorTexture"]), directory, textures,
+                              &material->base_color_texture, at + used, storage_size - used);
+    used += gltf_load_texture(gltf_texture_uri(json, source["normalTexture"]), directory, textures,
+                              &material->normal_texture, at + used, storage_size - used);
+    used += gltf_load_texture(gltf_texture_uri(json, source["emissiveTexture"]), directory, textures,
+                              &material->emissive_texture, at + used, storage_size - used);
+    return used;
 }
 
 static bool gltf_add_mesh(Gltf_Loader *loader, u64 mesh_index, const Matrix4 &transform)
@@ -397,9 +489,10 @@ static bool gltf_add_node(Gltf_Loader *loader, const Json &node_index, const Mat
     return true;
 }
 
-u64 load_glb_from_memory(const u8 *data, u64 size, Mesh *mesh, void *storage, u64 storage_size)
+u64 load_glb_from_memory(const u8 *data, u64 size, const char *directory, Model *model, Texture_Library *textures,
+                         void *storage, u64 storage_size)
 {
-    *mesh = {};
+    *model = {};
 
     if (size < 12 || gltf_read_u32(data) != GLB_MAGIC)
     {
@@ -464,15 +557,27 @@ u64 load_glb_from_memory(const u8 *data, u64 size, Mesh *mesh, void *storage, u6
         }
     }
 
-    if (loader.indices.empty())
+    u64 index_count = 0;
+    for (const Gltf_Part &part : loader.parts) index_count += part.indices.size();
+    if (index_count == 0)
     {
         log_error("glTF: no triangles to load");
         return 0;
     }
+    if (index_count > UINT32_MAX)
+    {
+        log_error("glTF: too many indices");
+        return 0;
+    }
+    if (loader.parts.size() > MODEL_MAX_PARTS)
+    {
+        log_error("glTF: the model has %llu materials, at most %u are supported",
+                  (unsigned long long)loader.parts.size(), MODEL_MAX_PARTS);
+        return 0;
+    }
 
     u32 vertex_count = (u32)loader.vertices.size();
-    u32 index_count  = (u32)loader.indices.size();
-    u64 needed       = mesh_storage_size(vertex_count, index_count);
+    u64 needed       = mesh_storage_size(vertex_count, (u32)index_count);
 
     if ((uintptr_t)storage % alignof(u32) != 0 || needed > storage_size)
     {
@@ -481,19 +586,34 @@ u64 load_glb_from_memory(const u8 *data, u64 size, Mesh *mesh, void *storage, u6
         return 0;
     }
 
-    mesh->vertices     = (Mesh_Vertex *)storage;
-    mesh->indices      = (u32 *)((u8 *)storage + (u64)vertex_count * sizeof(Mesh_Vertex));
-    mesh->vertex_count = vertex_count;
-    mesh->index_count  = index_count;
-    memcpy(mesh->vertices, loader.vertices.data(), (u64)vertex_count * sizeof(Mesh_Vertex));
-    memcpy(mesh->indices,  loader.indices.data(),  (u64)index_count  * sizeof(u32));
+    Mesh &mesh = model->mesh;
+    mesh.vertices     = (Mesh_Vertex *)storage;
+    mesh.indices      = (u32 *)((u8 *)storage + (u64)vertex_count * sizeof(Mesh_Vertex));
+    mesh.vertex_count = vertex_count;
+    mesh.index_count  = (u32)index_count;
+    memcpy(mesh.vertices, loader.vertices.data(), (u64)vertex_count * sizeof(Mesh_Vertex));
 
-    return needed;
+    // The parts' indices one after the other, and their materials' textures after them.
+    u64 used = needed;
+    u32 first_index = 0;
+    for (const Gltf_Part &part : loader.parts)
+    {
+        Model_Part &model_part = model->parts[model->part_count++];
+        model_part.first_index = first_index;
+        model_part.index_count = (u32)part.indices.size();
+        memcpy(mesh.indices + first_index, part.indices.data(), part.indices.size() * sizeof(u32));
+        first_index += model_part.index_count;
+
+        used += gltf_material(json, part.material, directory, textures, &model_part.material,
+                              (u8 *)storage + used, storage_size - used);
+    }
+
+    return used;
 }
 
-u64 load_glb(const char *path, Mesh *mesh, void *storage, u64 storage_size)
+u64 load_glb(const char *path, Model *model, Texture_Library *textures, void *storage, u64 storage_size)
 {
-    *mesh = {};
+    *model = {};
 
     FILE *file = fopen(path, "rb");
     if (!file)
@@ -514,9 +634,16 @@ u64 load_glb(const char *path, Mesh *mesh, void *storage, u64 storage_size)
     }
     fclose(file);
 
-    u64 used = data.empty() ? 0 : load_glb_from_memory(data.data(), data.size(), mesh, storage, storage_size);
+    // Images are next to the file.
+    std::string directory = path;
+    u64 slash = directory.find_last_of("/\\");
+    directory = slash == std::string::npos ? "" : directory.substr(0, slash);
+
+    u64 used = data.empty() ? 0 : load_glb_from_memory(data.data(), data.size(), directory.c_str(), model, textures,
+                                                       storage, storage_size);
     if (used)
-        log_info("Loaded \"%s\": %u vertices, %u triangles", path, mesh->vertex_count, mesh->index_count / 3);
+        log_info("Loaded \"%s\": %u vertices, %u triangles, %u materials", path, model->mesh.vertex_count,
+                 model->mesh.index_count / 3, model->part_count);
     else
         log_error("Could not load \"%s\"", path);
 
