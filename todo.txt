@@ -3,6 +3,5 @@
 - Only Linux draws anything: the Vulkan renderer is Linux-only, so Windows and macOS build with the null renderer. macOS has no window code at all yet.
 - The Windows window doesn't read the keyboard or mouse, so key bindings do nothing there.
 - Gamepads aren't read yet, although input.h already lists their keys.
-- frame.dt isn't capped: after a debugger pause, a slow reload or a dragged window the first frame can be seconds long and things jump.
 - Assets are only loaded at startup: editing a .glb or key_bindings.kvl needs a restart, unlike code changes.
 - Textures are copied to the GPU the first time they're drawn and kept until exit, recognized by their pixels' address: pixels changed in place aren't picked up, nothing is freed, and past 256 textures meshes are drawn white. The first draw of a texture also stalls the frame until its upload is done; it could go through the frames' staging buffers and upload command buffers like meshes do instead.

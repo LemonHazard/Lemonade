@@ -9,6 +9,7 @@
 #include "png.h"
 #include "logger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,9 @@
 constexpr u64 GAME_PERMANENT_MEMORY_SIZE = 256 * MiB;
 constexpr u64 GAME_TRANSIENT_MEMORY_SIZE = 256 * MiB;
 constexpr u64 RENDER_COMMANDS_SIZE       = 1 * MiB;
+// Longer frames (a debugger pause, a slow reload, a dragged window) reach the game as
+// this long: it slows down for a frame instead of jumping.
+constexpr r32 MAX_FRAME_DT               = 0.1f;
 
 // Where the Screenshot action saves frames, relative to the working directory.
 #define SCREENSHOT_DIR "screenshots"
@@ -201,7 +205,7 @@ int main(int argc, char **argv)
 
         Game_Frame frame = {};
         frame.input    = &input;
-        frame.dt       = std::chrono::duration<r32>(time - previous_time).count();
+        frame.dt       = std::min(std::chrono::duration<r32>(time - previous_time).count(), MAX_FRAME_DT);
         frame.width    = window.framebuffer_width;
         frame.height   = window.framebuffer_height;
         frame.reloaded = reloaded;
