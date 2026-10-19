@@ -54,6 +54,15 @@ inline Matrix4 operator*(const Matrix4 &a, const Matrix4 &b)
     return m;
 }
 
+// For homogeneous points, w included: divide by it after a projection.
+inline Vector4 operator*(const Matrix4 &m, Vector4 v)
+{
+    Vector4 result;
+    for (u32 row = 0; row < 4; ++row)
+        (&result.x)[row] = m.at(row, 0) * v.x + m.at(row, 1) * v.y + m.at(row, 2) * v.z + m.at(row, 3) * v.w;
+    return result;
+}
+
 inline Vector3 transform_point(const Matrix4 &m, Vector3 p)
 {
     Vector3 result;

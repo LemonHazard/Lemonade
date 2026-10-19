@@ -46,3 +46,17 @@ TEST_CASE("inverse leaves matrices without one as they are", "[matrix]")
     REQUIRE(inverse(flat).at(0, 0) == 1.0f);
     REQUIRE(inverse(flat).at(1, 1) == 0.0f);
 }
+
+TEST_CASE("a matrix times a Vector4 keeps w", "[matrix]")
+{
+    Matrix4 m = translation({ 1.0f, 2.0f, 3.0f });
+
+    Vector4 point = m * Vector4{ 1.0f, 1.0f, 1.0f, 1.0f };
+    REQUIRE(point.x == 2.0f);
+    REQUIRE(point.z == 4.0f);
+    REQUIRE(point.w == 1.0f);
+
+    Vector4 direction = m * Vector4{ 1.0f, 1.0f, 1.0f, 0.0f };
+    REQUIRE(direction.x == 1.0f);
+    REQUIRE(direction.w == 0.0f);
+}
