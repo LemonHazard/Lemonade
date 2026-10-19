@@ -5,8 +5,8 @@ layout(push_constant) uniform Push
 {
     mat4 model;
     vec4 base_color;
-    vec4 emissive_metallic;      // Emissive color, metallic (not used yet)
-    vec4 roughness_normal_scale; // Roughness (not used yet), normal scale
+    vec4 emissive_metallic;      // Emissive color, metallic
+    vec4 roughness_normal_scale; // Roughness, normal scale
 } push;
 
 // Matches Frame_Uniforms in renderer.cpp: the frame's camera and lighting, in world space.
@@ -84,17 +84,77 @@ vec3 surface_normal(vec3 normal, vec3 position, vec2 uv)
     return normalize(mat3(tangent * scale, -bitangent * scale, normal) * bent);
 }
 
+const float PI = 3.14159265;
+
+// The sun's light, as glTF's metallic-roughness materials reflect it: Lambert diffuse
+// and Cook-Torrance specular, with GGX's microfacets, Smith's height-correlated masking
+// and Schlick's Fresnel. Scaled by pi, so that a white, rough, non-metallic surface
+// facing the light reflects the light's color.
+vec3 reflected_light(vec3 normal, vec3 to_light, vec3 to_eye, vec3 diffuse_color, vec3 f0, float roughness)
+{
+    vec3  halfway   = normalize(to_light + to_eye);
+    float n_dot_l   = max(dot(normal, to_light), 0.0);
+    float n_dot_v   = max(dot(normal, to_eye), 1e-4);
+    float n_dot_h   = max(dot(normal, halfway), 0.0);
+    float v_dot_h   = max(dot(to_eye, halfway), 0.0);
+    float alpha     = roughness * roughness; // Roughness is perceptual: squared, it's linear
+    float alpha2    = alpha * alpha;
+
+    float d = alpha2 / (PI * pow(n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0, 2.0));
+    float v = 0.5 / max(n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2) +
+                        n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2), 1e-6);
+    vec3  f = f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
+
+    // What isn't reflected off the surface goes into it, and comes out diffuse.
+    vec3 specular = d * v * f;
+    vec3 diffuse  = (1.0 - f) * diffuse_color / PI;
+    return PI * (diffuse + specular) * n_dot_l;
+}
+
+// How much of light from all around a surface reflects specularly: the split-sum
+// approximation's scale and bias, fitted analytically (Brian Karis, "Physically Based
+// Shading on Mobile"), as there's no table of them to look up.
+vec3 environment_reflectance(vec3 f0, float roughness, float n_dot_v)
+{
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4( 1.0,  0.0425,  1.04, -0.04);
+    vec4  r    = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    vec2  ab   = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+// The sky's and the ground's light coming from `direction`: a blend from one to the other.
+vec3 ambient_light(vec3 direction)
+{
+    return mix(frame.ground_color.rgb, frame.sky_color.rgb, direction.y * 0.5 + 0.5);
+}
+
 void main()
 {
     vec3 vertex_normal = normalize(in_normal);
     vec3 normal        = surface_normal(vertex_normal, in_position, in_uv);
+    vec3 to_eye        = normalize(frame.camera_position.xyz - in_position);
+
+    vec4  color     = push.base_color * texture(base_color_texture, in_uv);
+    float metallic  = clamp(push.emissive_metallic.w, 0.0, 1.0);
+    float roughness = clamp(push.roughness_normal_scale.x, 0.045, 1.0); // Smoother turns highlights into specks
+
+    // Metals reflect their color and don't diffuse; everything else reflects 4%.
+    vec3 diffuse_color = color.rgb * (1.0 - metallic);
+    vec3 f0            = mix(vec3(0.04), color.rgb, metallic);
 
     // Shadows are cast by the geometry, so they're looked up off its own surface.
-    float facing  = max(dot(normal, frame.sun_direction.xyz), 0.0);
-    vec3  sun     = frame.sun_color.rgb * facing * sun_visibility(in_position, vertex_normal);
-    vec3  ambient = mix(frame.ground_color.rgb, frame.sky_color.rgb, normal.y * 0.5 + 0.5);
+    vec3 sun = frame.sun_color.rgb * sun_visibility(in_position, vertex_normal) *
+               reflected_light(normal, frame.sun_direction.xyz, to_eye, diffuse_color, f0, roughness);
 
-    vec4 color   = push.base_color * texture(base_color_texture, in_uv);
+    // The sky and the ground light it diffusely from where it faces, and are reflected
+    // from where the view bounces to: rough surfaces blur that towards where they face.
+    float n_dot_v    = max(dot(normal, to_eye), 1e-4);
+    vec3  specular   = environment_reflectance(f0, roughness, n_dot_v);
+    vec3  reflection = normalize(mix(reflect(-to_eye, normal), normal, roughness * roughness));
+    vec3  ambient    = (1.0 - specular) * diffuse_color * ambient_light(normal) + specular * ambient_light(reflection);
+
     vec3 emitted = push.emissive_metallic.rgb * texture(emissive_texture, in_uv).rgb;
-    out_color = vec4(color.rgb * (sun + ambient) + emitted, color.a);
+    out_color = vec4(sun + ambient + emitted, color.a);
 }
