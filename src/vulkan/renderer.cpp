@@ -55,8 +55,15 @@ constexpr u32 MAX_TEXTURES         = 1024;
 constexpr u32 TEXTURE_SLOT_BITS    = 11; // The hash table has twice MAX_TEXTURES slots
 constexpr u32 TEXTURE_SLOTS        = 1u << TEXTURE_SLOT_BITS;
 static_assert(TEXTURE_SLOTS >= 2 * MAX_TEXTURES, "The texture hash table needs empty slots to end its probes");
-// Texture pixels are sRGB-encoded, so the shaders sample linear colors.
-constexpr VkFormat TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_SRGB;
+// Colors are sRGB-encoded, so the shaders sample them linear; normals are read as they are.
+constexpr VkFormat COLOR_TEXTURE_FORMAT = VK_FORMAT_R8G8B8A8_SRGB;
+constexpr VkFormat DATA_TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_UNORM;
+// Each different set of textures a material uses gets a descriptor set, kept for the
+// next draws: past this many, meshes with new ones aren't drawn.
+constexpr u32 MAX_MATERIALS        = 1024;
+constexpr u32 MATERIAL_SLOT_BITS   = 11;
+constexpr u32 MATERIAL_SLOTS       = 1u << MATERIAL_SLOT_BITS;
+static_assert(MATERIAL_SLOTS >= 2 * MAX_MATERIALS, "The material hash table needs empty slots to end its probes");
 // The scene is rendered in linear colors that can go past 1, then tonemapped into the
 // swapchain. Every device can render to and sample this format.
 constexpr VkFormat HDR_FORMAT      = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -125,32 +132,43 @@ struct Native_Mesh
     u64                index_offset  = 0;
 };
 
-// A texture on the GPU, with the descriptor set the mesh shaders sample it through.
-// No pixels means the hash table slot is empty; no descriptor set means it couldn't be
-// created: it's drawn white. Its pixels are
-// copied over one or more frames, from the top row down; meshes are drawn with it once
-// they're all there.
+// A texture on the GPU, recognized by the game's pixels and the format they're read
+// as. No pixels means the hash table slot is empty; no view means it couldn't be
+// created: it's drawn as its slot's default. Its pixels are copied over one or more
+// frames, from the top row down; meshes are drawn with it once they're all there.
 struct Native_Texture
 {
     const u8       *pixels         = nullptr; // The game's, to recognize the texture by
     u32             width          = 0;
     u32             height         = 0;
+    VkFormat        format         = VK_FORMAT_UNDEFINED;
     u32             mip_levels     = 0;
     u32             rows_uploaded  = 0;       // From the top, with their copies recorded
     VkImage         image          = VK_NULL_HANDLE;
     VkDeviceMemory  memory         = VK_NULL_HANDLE;
     VkImageView     view           = VK_NULL_HANDLE;
-    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
 };
 
-// Matches the push constant block in shaders/mesh.vert.
+// The descriptor set of a material's textures, set 1 of the mesh shaders, recognized by
+// them. No base color texture means the hash table slot is empty.
+struct Native_Material
+{
+    const Native_Texture *base_color     = nullptr;
+    const Native_Texture *normal         = nullptr;
+    const Native_Texture *emissive       = nullptr;
+    VkDescriptorSet       descriptor_set = VK_NULL_HANDLE;
+};
+
+// Matches the push constant blocks in shaders/mesh.vert and mesh.frag: the transform
+// and the material's factors.
 struct Mesh_Push_Constants
 {
-    Matrix4 model;               // Model to world
-    float   normal_matrix[3][4]; // mat3: three columns, each padded to a vec4
-    Vector4 color;
+    Matrix4 model;                  // Model to world
+    Vector4 base_color;
+    Vector4 emissive_metallic;      // Emissive color, metallic
+    Vector4 roughness_normal_scale; // Roughness, normal scale, unused, unused
 };
-static_assert(sizeof(Mesh_Push_Constants) == 128, "Vulkan guarantees only 128 bytes of push constants");
+static_assert(sizeof(Mesh_Push_Constants) <= 128, "Vulkan guarantees only 128 bytes of push constants");
 
 // Matches the push constant block in shaders/shadow.vert.
 struct Shadow_Push_Constants
@@ -203,17 +221,23 @@ public:
     void destroy_attachment(VkImage *image, VkDeviceMemory *memory, VkImageView *view);
     bool create_buffer(u64 size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                        VkBuffer *buffer, VkDeviceMemory *memory);
-    // Creates the image and its descriptor set, without uploading anything. Leaves
-    // `texture` without a descriptor set on failure.
-    void create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture);
+    // Creates the image and its view, without uploading anything. Leaves `texture`
+    // without a view on failure.
+    void create_texture(const u8 *pixels, u32 width, u32 height, VkFormat format, Native_Texture *texture);
     // Records the copy of as many of the texture's remaining rows as the frame's
     // staging buffer has room for, and its mip levels once the last ones are in.
     void upload_texture(Native_Texture *texture, Native_Renderer_Frame &frame);
     void destroy_texture(Native_Texture *texture);
-    // The GPU copy of a texture, created the first time it's drawn and uploaded over
-    // that frame and the next ones. Returns nullptr while it's being uploaded: draws
-    // with it wait.
-    const Native_Texture *find_texture(const Texture &texture, Native_Renderer_Frame &frame);
+    // The GPU copy of a texture read as `format`, created the first time it's drawn and
+    // uploaded over that frame and the next ones; `fallback` when it has no pixels or
+    // can't be made. Returns nullptr while it's being uploaded: draws with it wait.
+    const Native_Texture *find_texture(const Texture &texture, VkFormat format, const Native_Texture *fallback,
+                                       Native_Renderer_Frame &frame);
+    // The descriptor set of the material's textures, made once they're all on the GPU.
+    // Returns VK_NULL_HANDLE until then, or when there are too many (logged).
+    VkDescriptorSet find_material(const Material &material, Native_Renderer_Frame &frame);
+    // Creates `texture` from `pixels` and uploads it before any frame begins, waiting for it.
+    bool create_texture_now(const u8 *pixels, u32 width, u32 height, VkFormat format, Native_Texture *texture);
     // The GPU copy of a mesh, recorded into the frame's uploads the first time it's
     // drawn. Returns nullptr when the mesh can't be drawn this frame (logged).
     const Native_Mesh *find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame);
@@ -296,12 +320,16 @@ public:
 
     VkDescriptorSetLayout frame_set_layout   = VK_NULL_HANDLE; // Set 0 of the mesh shaders
     VkDescriptorPool      frame_pool         = VK_NULL_HANDLE;
-    VkDescriptorSetLayout texture_set_layout = VK_NULL_HANDLE; // Set 1
-    VkDescriptorPool      texture_pool       = VK_NULL_HANDLE;
-    VkSampler             sampler            = VK_NULL_HANDLE;
-    Native_Texture        white_texture;                       // For meshes drawn without one
-    Native_Texture        textures[TEXTURE_SLOTS];             // Open addressing on the pixels' address
-    u32                   texture_count      = 0;
+    VkDescriptorSetLayout material_set_layout = VK_NULL_HANDLE; // Set 1: base color, normal, emissive
+    VkDescriptorPool      material_pool       = VK_NULL_HANDLE;
+    VkDescriptorSetLayout image_set_layout    = VK_NULL_HANDLE; // One image: the tonemapping's
+    VkSampler             sampler             = VK_NULL_HANDLE;
+    Native_Texture        white_texture;                        // For materials without a color texture
+    Native_Texture        flat_texture;                         // For materials without a normal texture
+    Native_Texture        textures[TEXTURE_SLOTS];              // Open addressing on the pixels' address
+    u32                   texture_count       = 0;
+    Native_Material       materials[MATERIAL_SLOTS];            // Open addressing on the textures' addresses
+    u32                   material_count      = 0;
 
     // Device-local vertices and indices of every mesh drawn so far, never freed.
     VkBuffer       mesh_buffer = VK_NULL_HANDLE;
@@ -327,6 +355,7 @@ public:
     bool mesh_too_big_logged  = false;
     bool meshes_full_logged   = false;
     bool textures_full_logged = false;
+    bool materials_full_logged = false;
 };
 
 // Fibonacci hashing of an address into a table of 2^bits slots: the low bits are
@@ -392,8 +421,10 @@ Renderer::~Renderer()
 
         for (auto &texture : n->textures) n->destroy_texture(&texture);
         n->destroy_texture(&n->white_texture);
-        if (n->texture_pool)       vkDestroyDescriptorPool(n->device, n->texture_pool, nullptr); // Frees the sets
-        if (n->texture_set_layout) vkDestroyDescriptorSetLayout(n->device, n->texture_set_layout, nullptr);
+        n->destroy_texture(&n->flat_texture);
+        if (n->material_pool)       vkDestroyDescriptorPool(n->device, n->material_pool, nullptr); // Frees the sets
+        if (n->material_set_layout) vkDestroyDescriptorSetLayout(n->device, n->material_set_layout, nullptr);
+        if (n->image_set_layout)    vkDestroyDescriptorSetLayout(n->device, n->image_set_layout, nullptr);
         if (n->frame_pool)         vkDestroyDescriptorPool(n->device, n->frame_pool, nullptr);
         if (n->frame_set_layout)   vkDestroyDescriptorSetLayout(n->device, n->frame_set_layout, nullptr);
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
@@ -626,28 +657,28 @@ void Renderer::draw_test_triangle()
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
 
-void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vector4 &color, const Texture &texture)
+void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
+                         const Material &material)
 {
     Native_Renderer *n = this->native;
-    if (!n->frame_started || mesh.index_count == 0) return;
+    if (!n->frame_started || index_count == 0) return;
+    if (first_index > mesh.index_count || index_count > mesh.index_count - first_index) return;
 
     Native_Renderer_Frame &frame = n->frames[n->frame_index];
 
     const Native_Mesh *native_mesh = n->find_mesh(mesh, frame);
     if (!native_mesh) return;
 
-    // Not drawn until its texture is all there, which can take a few frames.
-    const Native_Texture *native_texture = n->find_texture(texture, frame);
-    if (!native_texture) return;
+    // Not drawn until its textures are all there, which can take a few frames.
+    VkDescriptorSet material_set = n->find_material(material, frame);
+    if (!material_set) return;
 
-    Mesh_Push_Constants push = {};
-    push.model = transform;
-    push.color = color;
-
-    Matrix4 normals = normal_matrix(transform);
-    for (u32 column = 0; column < 3; ++column)
-        for (u32 row = 0; row < 3; ++row)
-            push.normal_matrix[column][row] = normals.at(row, column);
+    Mesh_Push_Constants push = {
+        .model                  = transform,
+        .base_color             = material.base_color,
+        .emissive_metallic      = { material.emissive.x, material.emissive.y, material.emissive.z, material.metallic },
+        .roughness_normal_scale = { material.roughness, material.normal_scale, 0.0f, 0.0f },
+    };
 
     // With their size, so that later frames' uploads to the rest of mesh_buffer don't
     // look like they could overwrite what this draw reads.
@@ -657,12 +688,12 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vecto
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
     vkCmdBindVertexBuffers2(command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
     vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
-    VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, native_texture->descriptor_set };
+    VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, material_set };
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline_layout,
                             0, 2, descriptor_sets, 0, nullptr);
     vkCmdPushConstants(command_buffer, n->mesh_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
-    vkCmdDrawIndexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
+    vkCmdDrawIndexed(command_buffer, index_count, 1, first_index, 0, 0);
 
     if (n->shadows_on)
     {
@@ -672,7 +703,7 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Vecto
         vkCmdBindIndexBuffer(shadow_command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
         vkCmdPushConstants(shadow_command_buffer, n->shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
                            0, sizeof(shadow_push), &shadow_push);
-        vkCmdDrawIndexed(shadow_command_buffer, mesh.index_count, 1, 0, 0, 0);
+        vkCmdDrawIndexed(shadow_command_buffer, index_count, 1, first_index, 0, 0);
     }
 }
 
@@ -1427,32 +1458,46 @@ bool Native_Renderer::create_buffer(u64 size, VkBufferUsageFlags usage, VkMemory
 
 bool Native_Renderer::create_texture_resources()
 {
-    VkDescriptorSetLayoutBinding binding = {
+    VkDescriptorSetLayoutBinding image_binding = {
         .binding         = 0,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = 1,
         .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
     };
-    VkDescriptorSetLayoutCreateInfo layout_info = {
+    VkDescriptorSetLayoutCreateInfo image_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
-        .pBindings    = &binding,
+        .pBindings    = &image_binding,
     };
-    if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->texture_set_layout),
+    if (!vk_check(vkCreateDescriptorSetLayout(this->device, &image_layout_info, nullptr, &this->image_set_layout),
                   "vkCreateDescriptorSetLayout")) return false;
 
-    // One set per texture, and one for the white texture.
+    // Base color, normal and emissive textures, in that order.
+    VkDescriptorSetLayoutBinding material_bindings[3];
+    for (u32 i = 0; i < 3; ++i)
+    {
+        material_bindings[i] = image_binding;
+        material_bindings[i].binding = i;
+    }
+    VkDescriptorSetLayoutCreateInfo material_layout_info = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 3,
+        .pBindings    = material_bindings,
+    };
+    if (!vk_check(vkCreateDescriptorSetLayout(this->device, &material_layout_info, nullptr, &this->material_set_layout),
+                  "vkCreateDescriptorSetLayout")) return false;
+
     VkDescriptorPoolSize pool_size = {
         .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = MAX_TEXTURES + 1,
+        .descriptorCount = 3 * MAX_MATERIALS,
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = MAX_TEXTURES + 1,
+        .maxSets       = MAX_MATERIALS,
         .poolSizeCount = 1,
         .pPoolSizes    = &pool_size,
     };
-    if (!vk_check(vkCreateDescriptorPool(this->device, &pool_info, nullptr, &this->texture_pool),
+    if (!vk_check(vkCreateDescriptorPool(this->device, &pool_info, nullptr, &this->material_pool),
                   "vkCreateDescriptorPool")) return false;
 
     // glTF's default sampler: linear filtering, repeating.
@@ -1468,13 +1513,20 @@ bool Native_Renderer::create_texture_resources()
     };
     if (!vk_check(vkCreateSampler(this->device, &sampler_info, nullptr, &this->sampler), "vkCreateSampler")) return false;
 
-    // The white texture is there from the first frame on: its upload goes through the
-    // first frame's staging buffer and is waited for, before any frame begins.
+    // The defaults are there from the first frame on.
     static const u8 white[4] = { 255, 255, 255, 255 };
+    static const u8 flat[4]  = { 128, 128, 255, 255 }; // (0, 0, 1): straight out of the surface
+    return this->create_texture_now(white, 1, 1, COLOR_TEXTURE_FORMAT, &this->white_texture)
+        && this->create_texture_now(flat, 1, 1, DATA_TEXTURE_FORMAT, &this->flat_texture);
+}
+
+bool Native_Renderer::create_texture_now(const u8 *pixels, u32 width, u32 height, VkFormat format, Native_Texture *texture)
+{
+    // Through the first frame's staging buffer, before it begins.
     Native_Renderer_Frame &frame = this->frames[0];
-    this->create_texture(white, 1, 1, &this->white_texture);
-    if (!this->white_texture.descriptor_set) return false;
-    this->upload_texture(&this->white_texture, frame);
+    this->create_texture(pixels, width, height, format, texture);
+    if (!texture->view) return false;
+    this->upload_texture(texture, frame);
     this->end_uploads(frame);
 
     VkCommandBufferSubmitInfo command_buffer_info = {
@@ -1599,28 +1651,29 @@ bool Native_Renderer::create_frame_descriptors()
         vkUpdateDescriptorSets(this->device, 2, writes, 0, nullptr);
     }
 
-    // Like a texture's, but of hdr_image: written by create_swapchain(), which makes it.
+    // Of hdr_image: written by create_swapchain(), which makes it.
     VkDescriptorSetAllocateInfo tonemap_set_info = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = this->frame_pool,
         .descriptorSetCount = 1,
-        .pSetLayouts        = &this->texture_set_layout,
+        .pSetLayouts        = &this->image_set_layout,
     };
     return vk_check(vkAllocateDescriptorSets(this->device, &tonemap_set_info, &this->tonemap_set),
                     "vkAllocateDescriptorSets");
 }
 
-void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture)
+void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, VkFormat format, Native_Texture *texture)
 {
     *texture = {};
     texture->pixels = pixels;
     texture->width  = width;
     texture->height = height;
+    texture->format = format;
 
     // Each mip level is blitted from the previous one, which needs linear filtering of
     // the format: without it the texture has just its full-size level.
     VkFormatProperties format_properties;
-    vkGetPhysicalDeviceFormatProperties(this->physical_device, TEXTURE_FORMAT, &format_properties);
+    vkGetPhysicalDeviceFormatProperties(this->physical_device, format, &format_properties);
     const VkFormatFeatureFlags blit_features = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
                                                VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     u32 mip_levels = 1;
@@ -1630,19 +1683,20 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
     }
     texture->mip_levels = mip_levels;
 
-    // On failure the texture keeps just what it's recognized by, and is drawn white.
+    // On failure the texture keeps just what it's recognized by, and is drawn as the default.
     auto fail = [&]()
     {
         this->destroy_texture(texture);
         texture->pixels = pixels;
         texture->width  = width;
         texture->height = height;
+        texture->format = format;
     };
 
     VkImageCreateInfo image_info = {
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType     = VK_IMAGE_TYPE_2D,
-        .format        = TEXTURE_FORMAT,
+        .format        = format,
         .extent        = { width, height, 1 },
         .mipLevels     = mip_levels,
         .arrayLayers   = 1,
@@ -1672,38 +1726,10 @@ void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Na
         .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image            = texture->image,
         .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = TEXTURE_FORMAT,
+        .format           = format,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, 1 },
     };
     if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &texture->view), "vkCreateImageView")) return fail();
-
-    // Sets aren't freed one by one, so this comes last: nothing can fail after it.
-    VkDescriptorSetAllocateInfo set_info = {
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = this->texture_pool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &this->texture_set_layout,
-    };
-    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-    if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &descriptor_set), "vkAllocateDescriptorSets")) return fail();
-
-    // The image is in this layout by the time the set is used: draws wait for the upload.
-    VkDescriptorImageInfo image_descriptor = {
-        .sampler     = this->sampler,
-        .imageView   = texture->view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    VkWriteDescriptorSet write = {
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = descriptor_set,
-        .dstBinding      = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo      = &image_descriptor,
-    };
-    vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
-
-    texture->descriptor_set = descriptor_set;
 }
 
 void Native_Renderer::upload_texture(Native_Texture *texture, Native_Renderer_Frame &frame)
@@ -1814,9 +1840,10 @@ void Native_Renderer::destroy_texture(Native_Texture *texture)
     *texture = {};
 }
 
-const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Native_Renderer_Frame &frame)
+const Native_Texture *Native_Renderer::find_texture(const Texture &texture, VkFormat format, const Native_Texture *fallback,
+                                                    Native_Renderer_Frame &frame)
 {
-    if (!texture.pixels || texture.width == 0 || texture.height == 0) return &this->white_texture;
+    if (!texture.pixels || texture.width == 0 || texture.height == 0) return fallback;
 
     u32 slot = hash_address(texture.pixels, TEXTURE_SLOT_BITS);
 
@@ -1825,7 +1852,8 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Nati
     {
         Native_Texture &candidate = this->textures[slot];
         if (!candidate.pixels) break;
-        if (candidate.pixels == texture.pixels && candidate.width == texture.width && candidate.height == texture.height)
+        if (candidate.pixels == texture.pixels && candidate.width == texture.width && candidate.height == texture.height &&
+            candidate.format == format)
         {
             found = &candidate;
             break;
@@ -1839,24 +1867,92 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture, Nati
         {
             if (!this->textures_full_logged)
             {
-                log_warn("Textures past the first %u are drawn white", MAX_TEXTURES);
+                log_warn("Textures past the first %u aren't drawn: their defaults are", MAX_TEXTURES);
                 this->textures_full_logged = true;
             }
-            return &this->white_texture;
+            return fallback;
         }
 
         // Kept even when it fails, so it isn't tried again every frame.
         found = &this->textures[slot];
         this->texture_count += 1;
-        this->create_texture(texture.pixels, texture.width, texture.height, found);
-        if (!found->descriptor_set)
-            log_error("Could not create a %ux%u texture: it's drawn white", texture.width, texture.height);
+        this->create_texture(texture.pixels, texture.width, texture.height, format, found);
+        if (!found->view)
+            log_error("Could not create a %ux%u texture: its default is drawn instead", texture.width, texture.height);
     }
 
-    if (!found->descriptor_set) return &this->white_texture;
+    if (!found->view) return fallback;
 
     if (found->rows_uploaded < found->height) this->upload_texture(found, frame);
     return found->rows_uploaded == found->height ? found : nullptr;
+}
+
+VkDescriptorSet Native_Renderer::find_material(const Material &material, Native_Renderer_Frame &frame)
+{
+    // Every texture gets its turn at the frame's uploads, even when another one isn't
+    // ready yet.
+    const Native_Texture *base_color = this->find_texture(material.base_color_texture, COLOR_TEXTURE_FORMAT,
+                                                          &this->white_texture, frame);
+    const Native_Texture *normal     = this->find_texture(material.normal_texture, DATA_TEXTURE_FORMAT,
+                                                          &this->flat_texture, frame);
+    const Native_Texture *emissive   = this->find_texture(material.emissive_texture, COLOR_TEXTURE_FORMAT,
+                                                          &this->white_texture, frame);
+    if (!base_color || !normal || !emissive) return VK_NULL_HANDLE;
+
+    uintptr_t key = (uintptr_t)base_color ^ ((uintptr_t)normal << 1) ^ ((uintptr_t)emissive << 2);
+    u32 slot = hash_address((const void *)key, MATERIAL_SLOT_BITS);
+    for (;; slot = (slot + 1) & (MATERIAL_SLOTS - 1))
+    {
+        const Native_Material &candidate = this->materials[slot];
+        if (!candidate.base_color) break;
+        if (candidate.base_color == base_color && candidate.normal == normal && candidate.emissive == emissive)
+            return candidate.descriptor_set;
+    }
+
+    if (this->material_count == MAX_MATERIALS)
+    {
+        if (!this->materials_full_logged)
+        {
+            log_warn("Meshes with materials past the first %u sets of textures aren't drawn", MAX_MATERIALS);
+            this->materials_full_logged = true;
+        }
+        return VK_NULL_HANDLE;
+    }
+
+    VkDescriptorSetAllocateInfo set_info = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = this->material_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &this->material_set_layout,
+    };
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &descriptor_set), "vkAllocateDescriptorSets"))
+        return VK_NULL_HANDLE;
+
+    const Native_Texture *textures[3] = { base_color, normal, emissive };
+    VkDescriptorImageInfo images[3];
+    VkWriteDescriptorSet  writes[3];
+    for (u32 i = 0; i < 3; ++i)
+    {
+        images[i] = {
+            .sampler     = this->sampler,
+            .imageView   = textures[i]->view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        writes[i] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = descriptor_set,
+            .dstBinding      = i,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &images[i],
+        };
+    }
+    vkUpdateDescriptorSets(this->device, 3, writes, 0, nullptr);
+
+    this->materials[slot] = { base_color, normal, emissive, descriptor_set };
+    this->material_count += 1;
+    return descriptor_set;
 }
 
 const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame)
@@ -1974,7 +2070,7 @@ bool Native_Renderer::create_pipelines()
     VkPipelineLayoutCreateInfo tonemap_layout_info = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount         = 1,
-        .pSetLayouts            = &this->texture_set_layout,
+        .pSetLayouts            = &this->image_set_layout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &tonemap_push_constants,
     };
@@ -2000,7 +2096,7 @@ bool Native_Renderer::create_pipelines()
         .offset     = 0,
         .size       = sizeof(Mesh_Push_Constants),
     };
-    VkDescriptorSetLayout mesh_set_layouts[2] = { this->frame_set_layout, this->texture_set_layout };
+    VkDescriptorSetLayout mesh_set_layouts[2] = { this->frame_set_layout, this->material_set_layout };
     VkPipelineLayoutCreateInfo mesh_layout_info = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount         = 2,

@@ -5,6 +5,8 @@
 #include "matrix.h"
 #include "mesh.h"
 #include "texture.h"
+#include "material.h"
+#include "model.h"
 #include "lighting.h"
 
 #include <cstddef>
@@ -33,10 +35,11 @@ struct Render_Command_Draw_Mesh
     // Read when the frame that first draws it is drawn, after the game's update
     // returns: the vertices and indices must still be there then (in the game's
     // memory, not on its stack). Later frames draw the renderer's copy (see mesh.h).
-    Mesh    mesh;
-    Matrix4 transform; // Model to world
-    Vector4 color;     // Linear color, multiplied by the texture's
-    Texture texture;   // Also read then; none draws the color alone
+    Mesh     mesh;
+    u32      first_index; // The triangles drawn: index_count of the mesh's indices from first_index
+    u32      index_count;
+    Matrix4  transform;   // Model to world
+    Material material;    // Its textures are read then too
 };
 
 struct Render_Commands
@@ -79,15 +82,33 @@ inline void push_test_triangle(Render_Commands *commands)
     push_render_command(commands, Render_Command_Type::Test_Triangle, sizeof(Render_Command_Header));
 }
 
-inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
-                      const Texture &texture = {})
+// Draws the mesh's triangles from first_index on, index_count of them (all by default).
+inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Material &material,
+                      u32 first_index = 0, u32 index_count = UINT32_MAX)
 {
     auto *command = (Render_Command_Draw_Mesh *)
         push_render_command(commands, Render_Command_Type::Draw_Mesh, sizeof(Render_Command_Draw_Mesh));
     if (!command) return;
 
-    command->mesh      = mesh;
-    command->transform = transform;
-    command->color     = color;
-    command->texture   = texture;
+    command->mesh        = mesh;
+    command->first_index = first_index;
+    command->index_count = index_count == UINT32_MAX ? mesh.index_count - first_index : index_count;
+    command->transform   = transform;
+    command->material    = material;
+}
+
+inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
+                      const Texture &texture = {})
+{
+    push_mesh(commands, mesh, transform, plain_material(color, texture));
+}
+
+// Every part of the model, each with its material.
+inline void push_model(Render_Commands *commands, const Model &model, const Matrix4 &transform)
+{
+    for (u32 i = 0; i < model.part_count; ++i)
+    {
+        const Model_Part &part = model.parts[i];
+        push_mesh(commands, model.mesh, transform, part.material, part.first_index, part.index_count);
+    }
 }

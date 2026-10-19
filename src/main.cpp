@@ -129,7 +129,8 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             case Render_Command_Type::Draw_Mesh:
             {
                 auto *command = (const Render_Command_Draw_Mesh *)header;
-                renderer.draw_mesh(command->mesh, command->transform, command->color, command->texture);
+                renderer.draw_mesh(command->mesh, command->first_index, command->index_count, command->transform,
+                                   command->material);
                 break;
             }
         }
