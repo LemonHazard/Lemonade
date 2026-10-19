@@ -21,7 +21,7 @@
 #define WIDEN_(text) L ## text
 #define WIDEN(text)  WIDEN_(text)
 
-constexpr u64 GAME_PERMANENT_MEMORY_SIZE = 64 * MiB;
+constexpr u64 GAME_PERMANENT_MEMORY_SIZE = 256 * MiB;
 constexpr u64 GAME_TRANSIENT_MEMORY_SIZE = 256 * MiB;
 constexpr u64 RENDER_COMMANDS_SIZE       = 1 * MiB;
 
