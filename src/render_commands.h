@@ -5,6 +5,7 @@
 #include "matrix.h"
 #include "mesh.h"
 #include "texture.h"
+#include "lighting.h"
 
 #include <cstddef>
 
@@ -40,13 +41,16 @@ struct Render_Command_Draw_Mesh
 
 struct Render_Commands
 {
-    Vector4 clear_color;     // Linear color
-    Matrix4 view_projection; // World to clip space, for every mesh in the frame (identity by default)
+    // For every mesh in the frame, reset by the engine each frame.
+    Vector4  clear_color;     // Linear color
+    Matrix4  view_projection; // World to clip space (identity by default)
+    Vector3  camera_position; // World space, for light reflected towards it (none yet); the origin by default
+    Lighting lighting;        // default_lighting() by default
 
-    u8  *buffer;
-    u64  capacity;
-    u64  used;
-    u32  dropped; // Commands that didn't fit this frame: the engine warns about them
+    u8      *buffer;
+    u64      capacity;
+    u64      used;
+    u32      dropped; // Commands that didn't fit this frame: the engine warns about them
 };
 
 // Reserves a command of `size` bytes, header included, and fills in the header.

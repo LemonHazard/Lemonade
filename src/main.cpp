@@ -200,6 +200,8 @@ int main(int argc, char **argv)
 
         render_commands.clear_color     = clear_color;
         render_commands.view_projection = identity();
+        render_commands.camera_position = {};
+        render_commands.lighting        = default_lighting();
         render_commands.used            = 0;
         render_commands.dropped         = 0;
 
@@ -227,7 +229,7 @@ int main(int argc, char **argv)
         // The engine's own action, bound in key_bindings.kvl like the game's.
         bool screenshot_pressed = input.was_pressed("Screenshot");
 
-        if (renderer.begin_frame(render_commands.clear_color))
+        if (renderer.begin_frame(render_commands.clear_color, render_commands.camera_position, render_commands.lighting))
         {
             draw(renderer, render_commands);
             ++frames_drawn;

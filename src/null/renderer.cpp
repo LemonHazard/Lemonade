@@ -21,7 +21,7 @@ Renderer::~Renderer()
     delete this->native;
 }
 
-bool Renderer::begin_frame(const Vector4 &)
+bool Renderer::begin_frame(const Vector4 &, const Vector3 &, const Lighting &)
 {
     return false;
 }

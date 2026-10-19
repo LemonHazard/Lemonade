@@ -49,6 +49,16 @@ static_assert(TEXTURE_SLOTS >= 2 * MAX_TEXTURES, "The texture hash table needs e
 // Texture pixels are sRGB-encoded, so the shaders sample linear colors.
 constexpr VkFormat TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_SRGB;
 
+// Matches the uniform block in shaders/mesh.frag (std140: vec3s padded to vec4s).
+struct Frame_Uniforms
+{
+    Vector4 camera_position;
+    Vector4 sun_direction; // Unit length
+    Vector4 sun_color;
+    Vector4 sky_color;
+    Vector4 ground_color;
+};
+
 struct Native_Renderer_Frame
 {
     VkCommandPool   command_pool   = VK_NULL_HANDLE;
@@ -68,6 +78,14 @@ struct Native_Renderer_Frame
     VkDeviceMemory  staging_memory = VK_NULL_HANDLE;
     u8             *staging_mapped = nullptr;
     u64             staging_used   = 0;
+
+    // The frame's camera and lighting, written by begin_frame() once the GPU is done
+    // with the previous frame that used them, and the set the mesh shaders read them
+    // through.
+    VkBuffer        uniform_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory  uniform_memory = VK_NULL_HANDLE;
+    Frame_Uniforms *uniform_mapped = nullptr;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
 };
 
 // A mesh copied to mesh_buffer, recognized by the game's pointers and counts. No
@@ -133,6 +151,7 @@ public:
     bool create_device();
     bool create_frames();
     bool create_texture_resources();
+    bool create_frame_descriptors();
     bool create_pipelines();
     bool create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline);
     bool create_swapchain(u32 width, u32 height);
@@ -202,7 +221,9 @@ public:
     VkPipelineLayout mesh_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       mesh_pipeline        = VK_NULL_HANDLE;
 
-    VkDescriptorSetLayout texture_set_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout frame_set_layout   = VK_NULL_HANDLE; // Set 0 of the mesh shaders
+    VkDescriptorPool      frame_pool         = VK_NULL_HANDLE;
+    VkDescriptorSetLayout texture_set_layout = VK_NULL_HANDLE; // Set 1
     VkDescriptorPool      texture_pool       = VK_NULL_HANDLE;
     VkSampler             sampler            = VK_NULL_HANDLE;
     Native_Texture        white_texture;                       // For meshes drawn without one
@@ -265,6 +286,7 @@ Renderer::Renderer(Window &window)
            && this->native->create_device()
            && this->native->create_frames()
            && this->native->create_texture_resources()
+           && this->native->create_frame_descriptors()
            && this->native->create_pipelines();
 
     if (!ok)
@@ -294,6 +316,8 @@ Renderer::~Renderer()
         n->destroy_texture(&n->white_texture);
         if (n->texture_pool)       vkDestroyDescriptorPool(n->device, n->texture_pool, nullptr); // Frees the sets
         if (n->texture_set_layout) vkDestroyDescriptorSetLayout(n->device, n->texture_set_layout, nullptr);
+        if (n->frame_pool)         vkDestroyDescriptorPool(n->device, n->frame_pool, nullptr);
+        if (n->frame_set_layout)   vkDestroyDescriptorSetLayout(n->device, n->frame_set_layout, nullptr);
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
 
         if (n->mesh_buffer) vkDestroyBuffer(n->device, n->mesh_buffer, nullptr);
@@ -312,6 +336,8 @@ Renderer::~Renderer()
             if (frame.command_pool)   vkDestroyCommandPool(n->device, frame.command_pool, nullptr);
             if (frame.staging_buffer) vkDestroyBuffer(n->device, frame.staging_buffer, nullptr);
             if (frame.staging_memory) vkFreeMemory(n->device, frame.staging_memory, nullptr); // Unmaps it
+            if (frame.uniform_buffer) vkDestroyBuffer(n->device, frame.uniform_buffer, nullptr);
+            if (frame.uniform_memory) vkFreeMemory(n->device, frame.uniform_memory, nullptr);
         }
 
         vkDestroyDevice(n->device, nullptr);
@@ -333,7 +359,7 @@ Renderer::~Renderer()
     delete n;
 }
 
-bool Renderer::begin_frame(const Vector4 &clear_color)
+bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_position, const Lighting &lighting)
 {
     Native_Renderer *n = this->native;
     n->frame_started = false;
@@ -372,6 +398,16 @@ bool Renderer::begin_frame(const Vector4 &clear_color)
     }
 
     vkResetFences(n->device, 1, &frame.in_flight);
+
+    auto to_vector4 = [](Vector3 v) { return Vector4{ v.x, v.y, v.z, 0.0f }; };
+    Vector3 sun_direction = normalize(lighting.sun_direction);
+    *frame.uniform_mapped = {
+        .camera_position = to_vector4(camera_position),
+        .sun_direction   = to_vector4(sun_direction),
+        .sun_color       = to_vector4(lighting.sun_color),
+        .sky_color       = to_vector4(lighting.sky_color),
+        .ground_color    = to_vector4(lighting.ground_color),
+    };
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
     frame.staging_used = 0;
@@ -502,8 +538,9 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
     vkCmdBindVertexBuffers(command_buffer, 0, 1, &n->mesh_buffer, &offset);
     vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
+    VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, native_texture->descriptor_set };
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline_layout,
-                            0, 1, &native_texture->descriptor_set, 0, nullptr);
+                            0, 2, descriptor_sets, 0, nullptr);
     vkCmdPushConstants(command_buffer, n->mesh_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDrawIndexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
@@ -1026,6 +1063,12 @@ bool Native_Renderer::create_frames()
                                  &frame.staging_buffer, &frame.staging_memory)) return false;
         if (!vk_check(vkMapMemory(this->device, frame.staging_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.staging_mapped),
                       "vkMapMemory")) return false;
+
+        if (!this->create_buffer(sizeof(Frame_Uniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                 &frame.uniform_buffer, &frame.uniform_memory)) return false;
+        if (!vk_check(vkMapMemory(this->device, frame.uniform_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.uniform_mapped),
+                      "vkMapMemory")) return false;
     }
 
     return this->create_buffer(MESH_BUFFER_SIZE,
@@ -1143,6 +1186,65 @@ bool Native_Renderer::create_texture_resources()
     frame.uploading    = false;
     frame.staging_used = 0;
     return ok;
+}
+
+bool Native_Renderer::create_frame_descriptors()
+{
+    VkDescriptorSetLayoutBinding binding = {
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = &binding,
+    };
+    if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->frame_set_layout),
+                  "vkCreateDescriptorSetLayout")) return false;
+
+    VkDescriptorPoolSize pool_size = {
+        .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = FRAMES_IN_FLIGHT,
+    };
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = FRAMES_IN_FLIGHT,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &pool_size,
+    };
+    if (!vk_check(vkCreateDescriptorPool(this->device, &pool_info, nullptr, &this->frame_pool),
+                  "vkCreateDescriptorPool")) return false;
+
+    for (auto &frame : this->frames)
+    {
+        VkDescriptorSetAllocateInfo set_info = {
+            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool     = this->frame_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts        = &this->frame_set_layout,
+        };
+        if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &frame.descriptor_set),
+                      "vkAllocateDescriptorSets")) return false;
+
+        VkDescriptorBufferInfo buffer_descriptor = {
+            .buffer = frame.uniform_buffer,
+            .offset = 0,
+            .range  = sizeof(Frame_Uniforms),
+        };
+        VkWriteDescriptorSet write = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = frame.descriptor_set,
+            .dstBinding      = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &buffer_descriptor,
+        };
+        vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
+    }
+
+    return true;
 }
 
 void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture)
@@ -1503,10 +1605,11 @@ bool Native_Renderer::create_pipelines()
         .offset     = 0,
         .size       = sizeof(Mesh_Push_Constants),
     };
+    VkDescriptorSetLayout mesh_set_layouts[2] = { this->frame_set_layout, this->texture_set_layout };
     VkPipelineLayoutCreateInfo mesh_layout_info = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount         = 1,
-        .pSetLayouts            = &this->texture_set_layout,
+        .setLayoutCount         = 2,
+        .pSetLayouts            = mesh_set_layouts,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &push_constants,
     };

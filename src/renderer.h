@@ -5,6 +5,7 @@
 #include "matrix.h"
 #include "mesh.h"
 #include "texture.h"
+#include "lighting.h"
 
 class Window;
 class Native_Renderer;
@@ -17,9 +18,10 @@ public:
 
     // Returns false when there is nothing to draw this frame (e.g. the window is
     // minimized or the swapchain is being recreated); skip drawing and end_frame().
-    bool begin_frame(const Vector4 &clear_color);
+    // The camera and lighting are for every mesh drawn in the frame.
+    bool begin_frame(const Vector4 &clear_color, const Vector3 &camera_position, const Lighting &lighting);
     void draw_test_triangle();
-    // Lit by a fixed directional light, depth-tested and back-face culled. Its color
+    // Lit by the frame's lighting, depth-tested and back-face culled. Its color
     // is `color` times `texture` (white when it has no pixels), mipmapped and repeated.
     // Nothing is drawn while the mesh or the texture is still on its way to the GPU,
     // which can take a few frames after their first draw.
