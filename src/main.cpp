@@ -133,7 +133,34 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
                                    command->material);
                 break;
             }
+
+            case Render_Command_Type::Draw_Ui:
+            {
+                auto *command = (const Render_Command_Draw_Ui *)header;
+                renderer.draw_ui(command->mesh, command->first_index, command->index_count, command->texture,
+                                 command->clip, command->scale);
+                break;
+            }
+
+            case Render_Command_Type::Update_Texture:
+                renderer.update_texture(((const Render_Command_Update_Texture *)header)->texture);
+                break;
         }
+
+        if (header->size == 0)
+            break;
+        at += header->size;
+    }
+}
+
+// For a frame that isn't drawn: textures changed in it still have to be copied again.
+static void update_textures(Renderer &renderer, const Render_Commands &commands)
+{
+    for (u64 at = 0; at < commands.used;)
+    {
+        auto *header = (const Render_Command_Header *)(commands.buffer + at);
+        if (header->type == Render_Command_Type::Update_Texture)
+            renderer.update_texture(((const Render_Command_Update_Texture *)header)->texture);
 
         if (header->size == 0)
             break;
@@ -250,6 +277,10 @@ int main(int argc, char **argv)
             {
                 renderer.end_frame();
             }
+        }
+        else
+        {
+            update_textures(renderer, render_commands);
         }
     }
 

@@ -34,6 +34,14 @@ void Renderer::draw_mesh(const Mesh &, u32, u32, const Matrix4 &, const Material
 {
 }
 
+void Renderer::draw_ui(const Ui_Mesh &, u32, u32, const Texture &, const Vector4 &, r32)
+{
+}
+
+void Renderer::update_texture(const Texture &)
+{
+}
+
 void Renderer::end_frame()
 {
 }

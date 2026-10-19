@@ -29,6 +29,15 @@ public:
     // frame, over the rest, from the farthest to the nearest. Nothing is drawn while the mesh or a texture
     // is still on its way to the GPU, which can take a few frames after their first draw.
     void draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Material &material);
+    // Draws index_count of the UI mesh's indices from first_index on over the frame,
+    // after it's tonemapped, in the order of the calls (see Render_Command_Draw_Ui).
+    // The vertices and indices are copied right away. Not drawn while the texture is
+    // on its way to the GPU, like meshes.
+    void draw_ui(const Ui_Mesh &mesh, u32 first_index, u32 index_count, const Texture &texture, const Vector4 &clip,
+                 r32 scale);
+    // The texture's pixels changed: they're copied again before it's next drawn. Also
+    // between frames, when begin_frame() returned false.
+    void update_texture(const Texture &texture);
     void end_frame();
     // Ends the frame like end_frame(), then waits for the GPU to finish it and reads
     // back what it drew, for screenshots: 8-bit RGBA, sRGB-encoded as displayed, rows

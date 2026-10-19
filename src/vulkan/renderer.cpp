@@ -52,6 +52,12 @@ static const u32 bloom_down_frag_spv[] =
 static const u32 bloom_up_frag_spv[] =
 #include "bloom_up.frag.inc"
 ;
+static const u32 ui_vert_spv[] =
+#include "ui.vert.inc"
+;
+static const u32 ui_frag_spv[] =
+#include "ui.frag.inc"
+;
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
@@ -103,6 +109,9 @@ constexpr u32 IRRADIANCE_SIZE      = 16;
 // The bloom is the frame blurred wide: its levels go from half the frame's size down
 // to this many, or to 8 pixels.
 constexpr u32 MAX_BLOOM_LEVELS     = 8;
+// UI vertices and indices are copied to a buffer of this size each frame: past it, the
+// rest of the frame's UI isn't drawn.
+constexpr u64 UI_BUFFER_SIZE       = 8 * MiB;
 
 // Matches the uniform blocks in shaders/mesh.vert and mesh.frag (std140: vec3s padded
 // to vec4s).
@@ -172,6 +181,13 @@ struct Native_Renderer_Frame
     VkDeviceMemory  uniform_memory = VK_NULL_HANDLE;
     Frame_Uniforms *uniform_mapped = nullptr;
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+
+    // Host-visible vertices and indices of the frame's UI, which its draws read from
+    // there: filled from the start each frame, like the staging buffer.
+    VkBuffer        ui_buffer      = VK_NULL_HANDLE;
+    VkDeviceMemory  ui_memory      = VK_NULL_HANDLE;
+    u8             *ui_mapped      = nullptr;
+    u64             ui_used        = 0;
 };
 
 // A mesh copied to mesh_buffer, recognized by the game's pointers and counts. No
@@ -198,9 +214,11 @@ struct Native_Texture
     VkFormat        format         = VK_FORMAT_UNDEFINED;
     u32             mip_levels     = 0;
     u32             rows_uploaded  = 0;       // From the top, with their copies recorded
+    bool            replaced       = false;   // Copied again (see update_texture()): earlier frames may still read it
     VkImage         image          = VK_NULL_HANDLE;
     VkDeviceMemory  memory         = VK_NULL_HANDLE;
     VkImageView     view           = VK_NULL_HANDLE;
+    VkDescriptorSet ui_set         = VK_NULL_HANDLE; // For UI draws, made with the first one
 };
 
 // The descriptor set of a material's textures, set 1 of the mesh shaders, recognized by
@@ -257,6 +275,25 @@ struct Bloom_Push_Constants
     Vector2 source_texel; // Size of a texel of the image read, in UV
     Vector2 target_texel; // And of the level drawn
     r32     first;        // 1 for the first step down
+};
+
+// Matches the push constant blocks in shaders/ui.vert and ui.frag.
+struct Ui_Push_Constants
+{
+    Vector2 scale;       // From the vertices' units to clip space
+    r32     encode_srgb; // 1 when the swapchain doesn't encode sRGB itself
+};
+
+// A UI draw, kept for the end of the frame: they're drawn over it once it's tonemapped.
+struct Ui_Draw
+{
+    VkDescriptorSet texture_set;
+    VkDeviceSize    vertex_offset; // In the frame's ui_buffer
+    VkDeviceSize    index_offset;
+    u32             first_index;
+    u32             index_count;
+    VkRect2D        scissor;
+    r32             scale;         // Pixels per unit of the vertices' positions
 };
 
 enum class Blend_Mode
@@ -325,8 +362,8 @@ public:
     // The GPU copy of a texture read as `format`, created the first time it's drawn and
     // uploaded over that frame and the next ones; `fallback` when it has no pixels or
     // can't be made. Returns nullptr while it's being uploaded: draws with it wait.
-    const Native_Texture *find_texture(const Texture &texture, VkFormat format, const Native_Texture *fallback,
-                                       Native_Renderer_Frame &frame);
+    Native_Texture *find_texture(const Texture &texture, VkFormat format, Native_Texture *fallback,
+                                 Native_Renderer_Frame &frame);
     // The descriptor set of the material's textures, made once they're all on the GPU.
     // Returns VK_NULL_HANDLE until then, or when there are too many (logged).
     VkDescriptorSet find_material(const Material &material, Native_Renderer_Frame &frame);
@@ -350,8 +387,14 @@ public:
     void begin_shadow_pass(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     // Leaves the shadow map ready to be sampled by the frame's draws.
     void end_shadow_pass(VkCommandBuffer command_buffer);
-    // Draws the scene's colors into the swapchain image, fitted to the display.
-    void record_tonemap(VkCommandBuffer command_buffer);
+    // Draws the scene's colors into the swapchain image, fitted to the display, and the
+    // frame's UI over them.
+    void record_tonemap(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
+    // Draws the frame's UI draws, in the order they came, inside the tonemapping's rendering.
+    void record_ui_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
+    // The set UI draws read the texture through, made the first time. VK_NULL_HANDLE
+    // when it can't be.
+    VkDescriptorSet ui_texture_set(Native_Texture *texture);
     // Blurs the scene into bloom_image, leaving both ready to be sampled.
     void record_bloom(VkCommandBuffer command_buffer);
     // Draws the frame's blended draws over its solid ones, from the farthest on.
@@ -405,7 +448,12 @@ public:
     bool           shadows_on     = false;          // This frame's
     Vector3        camera_position;                 // This frame's
     std::vector<Blended_Draw> blended_draws;        // This frame's, so far
-
+    std::vector<Ui_Draw>      ui_draws;             // This frame's, so far
+    // The UI mesh last copied to the frame's ui_buffer and where it went: draws of the
+    // same one in a row (ImGui's draw lists) share the copy.
+    Ui_Mesh                   ui_copied        = {};
+    VkDeviceSize              ui_vertex_offset = 0;
+    VkDeviceSize              ui_index_offset  = 0;
 
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
@@ -420,6 +468,10 @@ public:
     VkPipeline       environment_pipeline        = VK_NULL_HANDLE;
     VkPipelineLayout sky_pipeline_layout         = VK_NULL_HANDLE;
     VkPipeline       sky_pipeline                = VK_NULL_HANDLE;
+    VkPipelineLayout ui_pipeline_layout          = VK_NULL_HANDLE;
+    VkPipeline       ui_pipeline                 = VK_NULL_HANDLE;
+    VkDescriptorPool ui_pool                     = VK_NULL_HANDLE; // A set for each texture UI draws use
+    VkSampler        ui_sampler                  = VK_NULL_HANDLE; // Linear, clamped to the edges
 
     // The sky's maps, remade when its colors change: sky, horizon, ground.
     Cube_Map         environment_map;
@@ -481,6 +533,7 @@ public:
     bool meshes_full_logged   = false;
     bool textures_full_logged = false;
     bool materials_full_logged = false;
+    bool ui_full_logged        = false;
 };
 
 // Fibonacci hashing of an address into a table of 2^bits slots: the low bits are
@@ -550,6 +603,10 @@ Renderer::~Renderer()
         if (n->bloom_sampler)           vkDestroySampler(n->device, n->bloom_sampler, nullptr);
         if (n->tonemap_set_layout)      vkDestroyDescriptorSetLayout(n->device, n->tonemap_set_layout, nullptr);
         if (n->tonemap_pipeline_layout) vkDestroyPipelineLayout(n->device, n->tonemap_pipeline_layout, nullptr);
+        if (n->ui_pipeline)             vkDestroyPipeline(n->device, n->ui_pipeline, nullptr);
+        if (n->ui_pipeline_layout)      vkDestroyPipelineLayout(n->device, n->ui_pipeline_layout, nullptr);
+        if (n->ui_pool)                 vkDestroyDescriptorPool(n->device, n->ui_pool, nullptr); // Frees the sets
+        if (n->ui_sampler)              vkDestroySampler(n->device, n->ui_sampler, nullptr);
 
         for (auto &texture : n->textures) n->destroy_texture(&texture);
         n->destroy_texture(&n->white_texture);
@@ -588,6 +645,8 @@ Renderer::~Renderer()
             if (frame.staging_memory) vkFreeMemory(n->device, frame.staging_memory, nullptr); // Unmaps it
             if (frame.uniform_buffer) vkDestroyBuffer(n->device, frame.uniform_buffer, nullptr);
             if (frame.uniform_memory) vkFreeMemory(n->device, frame.uniform_memory, nullptr);
+            if (frame.ui_buffer)      vkDestroyBuffer(n->device, frame.ui_buffer, nullptr);
+            if (frame.ui_memory)      vkFreeMemory(n->device, frame.ui_memory, nullptr); // Unmaps it
         }
 
         vkDestroyDevice(n->device, nullptr);
@@ -748,9 +807,12 @@ bool Renderer::begin_frame(const Render_Commands &commands)
     n->bloom           = lighting.bloom;
     n->camera_position = commands.camera_position;
     n->blended_draws.clear();
+    n->ui_draws.clear();
+    n->ui_copied = {};
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
     frame.staging_used = 0;
+    frame.ui_used      = 0;
 
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -932,6 +994,79 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     }
 }
 
+void Renderer::draw_ui(const Ui_Mesh &mesh, u32 first_index, u32 index_count, const Texture &texture,
+                       const Vector4 &clip, r32 scale)
+{
+    Native_Renderer *n = this->native;
+    if (!n->frame_started || index_count == 0 || !mesh.vertices || !mesh.indices) return;
+    if (first_index > mesh.index_count || index_count > mesh.index_count - first_index) return;
+
+    Native_Renderer_Frame &frame = n->frames[n->frame_index];
+
+    // Not drawn until its texture is there, which can take a few frames.
+    Native_Texture *native_texture = n->find_texture(texture, COLOR_TEXTURE_FORMAT, &n->white_texture, frame);
+    if (!native_texture) return;
+    VkDescriptorSet texture_set = n->ui_texture_set(native_texture);
+    if (!texture_set) return;
+
+    // The clip rectangle in pixels, inside the frame, on whole pixels around it.
+    r32 left   = std::max(std::floor(clip.x * scale), 0.0f);
+    r32 top    = std::max(std::floor(clip.y * scale), 0.0f);
+    r32 right  = std::min(std::ceil(clip.z * scale), (r32)n->swapchain_extent.width);
+    r32 bottom = std::min(std::ceil(clip.w * scale), (r32)n->swapchain_extent.height);
+    if (right <= left || bottom <= top) return;
+    VkRect2D scissor = { { (i32)left, (i32)top }, { (u32)(right - left), (u32)(bottom - top) } };
+
+    // Vertices, then indices, at 16-byte aligned offsets, unless they're the last ones copied.
+    bool copied = mesh.vertices == n->ui_copied.vertices && mesh.indices == n->ui_copied.indices &&
+                  mesh.vertex_count == n->ui_copied.vertex_count && mesh.index_count == n->ui_copied.index_count;
+    if (!copied)
+    {
+        auto align = [](u64 value) { return (value + 15) & ~(u64)15; };
+        u64 vertices_start = align(frame.ui_used);
+        u64 indices_start  = align(vertices_start + (u64)mesh.vertex_count * sizeof(Ui_Vertex));
+        u64 end            = indices_start + (u64)mesh.index_count * sizeof(u32);
+        if (end > UI_BUFFER_SIZE)
+        {
+            if (!n->ui_full_logged)
+            {
+                log_warn("UI past %llu MiB of vertices and indices in a frame isn't drawn",
+                         (unsigned long long)(UI_BUFFER_SIZE / MiB));
+                n->ui_full_logged = true;
+            }
+            return;
+        }
+
+        memcpy(frame.ui_mapped + vertices_start, mesh.vertices, (u64)mesh.vertex_count * sizeof(Ui_Vertex));
+        memcpy(frame.ui_mapped + indices_start,  mesh.indices,  (u64)mesh.index_count * sizeof(u32));
+        frame.ui_used       = end;
+        n->ui_copied        = mesh;
+        n->ui_vertex_offset = vertices_start;
+        n->ui_index_offset  = indices_start;
+    }
+
+    n->ui_draws.push_back({ texture_set, n->ui_vertex_offset, n->ui_index_offset, first_index, index_count, scissor, scale });
+}
+
+void Renderer::update_texture(const Texture &texture)
+{
+    Native_Renderer *n = this->native;
+    if (!n->ready || !texture.pixels) return;
+
+    // Whatever formats it's read as: they're all in the probe from its pixels' slot.
+    for (u32 slot = hash_address(texture.pixels, TEXTURE_SLOT_BITS);; slot = (slot + 1) & (TEXTURE_SLOTS - 1))
+    {
+        Native_Texture &candidate = n->textures[slot];
+        if (!candidate.pixels) break;
+        if (candidate.pixels == texture.pixels && candidate.width == texture.width && candidate.height == texture.height &&
+            candidate.view)
+        {
+            candidate.rows_uploaded = 0;
+            candidate.replaced      = true;
+        }
+    }
+}
+
 void Renderer::end_frame()
 {
     this->native->finish_frame(false);
@@ -978,7 +1113,7 @@ bool Native_Renderer::finish_frame(bool capture)
     this->record_blended_draws(frame.command_buffer, frame);
     vkCmdEndRendering(frame.command_buffer);
     this->record_bloom(frame.command_buffer);
-    this->record_tonemap(frame.command_buffer);
+    this->record_tonemap(frame.command_buffer, frame);
     this->end_shadow_pass(frame.shadow_command_buffer);
     vkEndCommandBuffer(frame.shadow_command_buffer);
 
@@ -1300,7 +1435,7 @@ void Native_Renderer::record_bloom(VkCommandBuffer command_buffer)
     }
 }
 
-void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
+void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
 {
     // The scene and its bloom are ready to be read: record_bloom() left them so.
     VkImageMemoryBarrier2 barriers[1] = {
@@ -1356,7 +1491,75 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
     vkCmdPushConstants(command_buffer, this->tonemap_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
 
+    this->record_ui_draws(command_buffer, frame);
+
     vkCmdEndRendering(command_buffer);
+}
+
+void Native_Renderer::record_ui_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
+{
+    if (this->ui_draws.empty()) return;
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->ui_pipeline);
+
+    bool srgb = this->surface_format.format == VK_FORMAT_B8G8R8A8_SRGB || this->surface_format.format == VK_FORMAT_R8G8B8A8_SRGB;
+    VkDeviceSize vertex_offset = UINT64_MAX;
+    VkDeviceSize index_offset  = UINT64_MAX;
+    for (const Ui_Draw &draw : this->ui_draws)
+    {
+        if (draw.vertex_offset != vertex_offset)
+        {
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.ui_buffer, &draw.vertex_offset);
+            vertex_offset = draw.vertex_offset;
+        }
+        if (draw.index_offset != index_offset)
+        {
+            vkCmdBindIndexBuffer(command_buffer, frame.ui_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
+            index_offset = draw.index_offset;
+        }
+
+        Ui_Push_Constants push = {
+            .scale       = { 2.0f * draw.scale / (r32)this->swapchain_extent.width,
+                             2.0f * draw.scale / (r32)this->swapchain_extent.height },
+            .encode_srgb = srgb ? 0.0f : 1.0f,
+        };
+        vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->ui_pipeline_layout,
+                                0, 1, &draw.texture_set, 0, nullptr);
+        vkCmdPushConstants(command_buffer, this->ui_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vkCmdSetScissor(command_buffer, 0, 1, &draw.scissor);
+        vkCmdDrawIndexed(command_buffer, draw.index_count, 1, draw.first_index, 0, 0);
+    }
+}
+
+VkDescriptorSet Native_Renderer::ui_texture_set(Native_Texture *texture)
+{
+    if (texture->ui_set) return texture->ui_set;
+
+    VkDescriptorSetAllocateInfo set_info = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = this->ui_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &this->image_set_layout,
+    };
+    if (!vk_check(vkAllocateDescriptorSets(this->device, &set_info, &texture->ui_set), "vkAllocateDescriptorSets"))
+        return VK_NULL_HANDLE;
+
+    VkDescriptorImageInfo image = {
+        .sampler     = this->ui_sampler,
+        .imageView   = texture->view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet write = {
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = texture->ui_set,
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &image,
+    };
+    vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
+    return texture->ui_set;
 }
 
 bool Native_Renderer::record_capture(VkCommandBuffer command_buffer)
@@ -1763,6 +1966,12 @@ bool Native_Renderer::create_frames()
                                  &frame.uniform_buffer, &frame.uniform_memory)) return false;
         if (!vk_check(vkMapMemory(this->device, frame.uniform_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.uniform_mapped),
                       "vkMapMemory")) return false;
+
+        if (!this->create_buffer(UI_BUFFER_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                 &frame.ui_buffer, &frame.ui_memory)) return false;
+        if (!vk_check(vkMapMemory(this->device, frame.ui_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.ui_mapped),
+                      "vkMapMemory")) return false;
     }
 
     return this->create_buffer(MESH_BUFFER_SIZE,
@@ -1892,6 +2101,27 @@ bool Native_Renderer::create_texture_resources()
         .maxLod       = VK_LOD_CLAMP_NONE,
     };
     if (!vk_check(vkCreateSampler(this->device, &sampler_info, nullptr, &this->sampler), "vkCreateSampler")) return false;
+
+    // UI draws a texture's edges, as a font's, without the other side bleeding in.
+    VkSamplerCreateInfo ui_sampler_info = sampler_info;
+    ui_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ui_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ui_sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (!vk_check(vkCreateSampler(this->device, &ui_sampler_info, nullptr, &this->ui_sampler), "vkCreateSampler")) return false;
+
+    // Every texture, and the white one, may be drawn as UI.
+    VkDescriptorPoolSize ui_pool_size = {
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_TEXTURES + 1,
+    };
+    VkDescriptorPoolCreateInfo ui_pool_info = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = MAX_TEXTURES + 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &ui_pool_size,
+    };
+    if (!vk_check(vkCreateDescriptorPool(this->device, &ui_pool_info, nullptr, &this->ui_pool), "vkCreateDescriptorPool"))
+        return false;
 
     // The defaults are there from the first frame on.
     static const u8 white[4] = { 255, 255, 255, 255 };
@@ -2352,11 +2582,15 @@ void Native_Renderer::upload_texture(Native_Texture *texture, Native_Renderer_Fr
     const u32                   mip_levels = texture->mip_levels;
 
     // The image stays laid out for copies until its last rows are in: the copies of
-    // later frames write other rows, so they need no barrier between them.
+    // later frames write other rows, so they need no barrier between them. Copied
+    // again, it's written once earlier frames are done reading it, and copying it.
     if (texture->rows_uploaded == 0)
     {
+        bool replaced = texture->replaced;
         barrier(0, mip_levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_PIPELINE_STAGE_2_NONE, 0, transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                replaced ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | transfer : VK_PIPELINE_STAGE_2_NONE,
+                replaced ? VK_ACCESS_2_TRANSFER_WRITE_BIT : 0, transfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        texture->replaced = false;
     }
 
     VkBufferImageCopy copy = {
@@ -2416,8 +2650,8 @@ void Native_Renderer::destroy_texture(Native_Texture *texture)
     *texture = {};
 }
 
-const Native_Texture *Native_Renderer::find_texture(const Texture &texture, VkFormat format, const Native_Texture *fallback,
-                                                    Native_Renderer_Frame &frame)
+Native_Texture *Native_Renderer::find_texture(const Texture &texture, VkFormat format, Native_Texture *fallback,
+                                              Native_Renderer_Frame &frame)
 {
     if (!texture.pixels || texture.width == 0 || texture.height == 0) return fallback;
 
@@ -2806,6 +3040,54 @@ bool Native_Renderer::create_pipelines()
     Pipeline_Description mesh_blend = mesh;
     mesh_blend.blend = Blend_Mode::Premultiplied;
     if (!this->create_graphics_pipeline(mesh_blend, &this->mesh_blend_pipeline)) return false;
+
+    // UI over the tonemapped frame, in the swapchain.
+    VkPushConstantRange ui_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(Ui_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo ui_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->image_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &ui_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &ui_layout_info, nullptr, &this->ui_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    VkVertexInputBindingDescription ui_binding = {
+        .binding   = 0,
+        .stride    = sizeof(Ui_Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription ui_attributes[3] = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,  .offset = offsetof(Ui_Vertex, position) },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,  .offset = offsetof(Ui_Vertex, uv) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R8G8B8A8_UNORM, .offset = offsetof(Ui_Vertex, color) },
+    };
+    VkPipelineVertexInputStateCreateInfo ui_vertex_input = {
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = 1,
+        .pVertexBindingDescriptions      = &ui_binding,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions    = ui_attributes,
+    };
+    Pipeline_Description ui = {
+        .vertex_code   = ui_vert_spv,
+        .vertex_size   = sizeof(ui_vert_spv),
+        .fragment_code = ui_frag_spv,
+        .fragment_size = sizeof(ui_frag_spv),
+        .vertex_input  = &ui_vertex_input,
+        .layout        = this->ui_pipeline_layout,
+        .color_format  = this->surface_format.format,
+        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
+        .blend         = Blend_Mode::Premultiplied,
+    };
+    if (!this->create_graphics_pipeline(ui, &this->ui_pipeline)) return false;
 
     // Meshes' positions alone, from the same vertices.
     VkPushConstantRange shadow_push_constants = {

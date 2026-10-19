@@ -19,6 +19,8 @@ enum class Render_Command_Type : u32
 {
     Test_Triangle,
     Draw_Mesh,
+    Draw_Ui,
+    Update_Texture,
 };
 
 // Every command starts with this header; `size` covers the header and the command's
@@ -40,6 +42,30 @@ struct Render_Command_Draw_Mesh
     u32      index_count;
     Matrix4  transform;   // Model to world
     Material material;    // Its textures are read then too
+};
+
+// Drawn over the frame once it's lit and tonemapped, in the order they're pushed, with
+// no depth or light: the texture's colors times the vertices', blended by their alpha.
+struct Render_Command_Draw_Ui
+{
+    Render_Command_Header header;
+    // Read when the frame is drawn, after the game's update returns: the vertices and
+    // indices must still be there then.
+    Ui_Mesh  mesh;
+    u32      first_index; // The triangles drawn: index_count of the mesh's indices from first_index
+    u32      index_count;
+    Texture  texture;     // None draws the vertices' colors alone
+    Vector4  clip;        // Nothing is drawn outside of it: left, top, right and bottom (x, y, z, w)
+    r32      scale;       // Pixels per unit of the positions and the clip rectangle: 1 for pixels
+};
+
+// The texture's pixels changed in place: the renderer copies them again before its next
+// draw, in this frame or later, so the frame's draws all see the new pixels. Until the
+// copy is done (big textures take a few frames, see texture.h) what's drawn with it waits.
+struct Render_Command_Update_Texture
+{
+    Render_Command_Header header;
+    Texture  texture;
 };
 
 struct Render_Commands
@@ -102,6 +128,32 @@ inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4
                       const Texture &texture = {})
 {
     push_mesh(commands, mesh, transform, plain_material(color, texture));
+}
+
+// Draws the UI mesh's triangles from first_index on, index_count of them (all by default),
+// over the frame and inside `clip`, with positions and `clip` in units of `scale` pixels.
+inline void push_ui(Render_Commands *commands, const Ui_Mesh &mesh, const Texture &texture, const Vector4 &clip,
+                    r32 scale = 1.0f, u32 first_index = 0, u32 index_count = UINT32_MAX)
+{
+    auto *command = (Render_Command_Draw_Ui *)
+        push_render_command(commands, Render_Command_Type::Draw_Ui, sizeof(Render_Command_Draw_Ui));
+    if (!command) return;
+
+    command->mesh        = mesh;
+    command->first_index = first_index;
+    command->index_count = index_count == UINT32_MAX ? mesh.index_count - first_index : index_count;
+    command->texture     = texture;
+    command->clip        = clip;
+    command->scale       = scale;
+}
+
+inline void push_texture_update(Render_Commands *commands, const Texture &texture)
+{
+    auto *command = (Render_Command_Update_Texture *)
+        push_render_command(commands, Render_Command_Type::Update_Texture, sizeof(Render_Command_Update_Texture));
+    if (!command) return;
+
+    command->texture = texture;
 }
 
 // Every part of the model, each with its material.
