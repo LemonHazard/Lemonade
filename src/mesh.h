@@ -4,7 +4,10 @@
 #include "vector.h"
 
 // Triangle meshes, as the game hands them to the renderer: the data stays where the
-// game keeps it (its memory, usually) and is read when the frame is drawn.
+// game keeps it (its memory, usually). Like textures, the renderer copies a mesh to the
+// GPU the first time it's drawn and keeps it there for the next frames, recognizing it
+// by its vertices' and indices' addresses and counts: data changed in place isn't
+// picked up.
 
 struct Mesh_Vertex
 {

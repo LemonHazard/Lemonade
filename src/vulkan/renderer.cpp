@@ -30,8 +30,16 @@ static const u32 mesh_frag_spv[] =
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
-// Meshes are copied into a buffer of this size every frame they're drawn in.
-constexpr u64 STREAM_BUFFER_SIZE   = 16 * MiB;
+// Meshes stay on the GPU once drawn, in one buffer of this size: past it, or past
+// this many meshes, new ones aren't drawn.
+constexpr u64 MESH_BUFFER_SIZE     = 128 * MiB;
+constexpr u32 MAX_MESHES           = 4096;
+constexpr u32 MESH_SLOT_BITS       = 13; // The hash table has twice MAX_MESHES slots
+constexpr u32 MESH_SLOTS           = 1u << MESH_SLOT_BITS;
+static_assert(MESH_SLOTS >= 2 * MAX_MESHES, "The mesh hash table needs empty slots to end its probes");
+// New meshes go through a staging buffer of this size each frame: when it's full the
+// rest are drawn from the next frames on, and bigger meshes aren't drawn at all.
+constexpr u64 STAGING_BUFFER_SIZE  = 16 * MiB;
 // Textures stay on the GPU once drawn: past this many, meshes are drawn untextured.
 constexpr u32 MAX_TEXTURES         = 256;
 // Texture pixels are sRGB-encoded, so the shaders sample linear colors.
@@ -44,12 +52,29 @@ struct Native_Renderer_Frame
     VkSemaphore     image_acquired = VK_NULL_HANDLE;
     VkFence         in_flight      = VK_NULL_HANDLE;
 
-    // Host-visible vertex and index data for the frame's meshes, filled from the
+    // Copies of the frame's new meshes to mesh_buffer, submitted just before
+    // command_buffer: rendering has begun there, and copies can't go inside it.
+    VkCommandBuffer upload_command_buffer = VK_NULL_HANDLE;
+    bool            uploading             = false; // upload_command_buffer has begun
+
+    // Host-visible vertices and indices of the frame's new meshes, filled from the
     // start each frame: the GPU is done with it once in_flight is signaled.
-    VkBuffer        stream_buffer  = VK_NULL_HANDLE;
-    VkDeviceMemory  stream_memory  = VK_NULL_HANDLE;
-    u8             *stream_mapped  = nullptr;
-    u64             stream_used    = 0;
+    VkBuffer        staging_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory  staging_memory = VK_NULL_HANDLE;
+    u8             *staging_mapped = nullptr;
+    u64             staging_used   = 0;
+};
+
+// A mesh copied to mesh_buffer, recognized by the game's pointers and counts. No
+// vertices means the hash table slot is empty.
+struct Native_Mesh
+{
+    const Mesh_Vertex *vertices      = nullptr;
+    const u32         *indices       = nullptr;
+    u32                vertex_count  = 0;
+    u32                index_count   = 0;
+    u64                vertex_offset = 0; // In mesh_buffer
+    u64                index_offset  = 0;
 };
 
 // A texture copied to the GPU, with the descriptor set the mesh shaders sample it
@@ -109,6 +134,9 @@ public:
     void destroy_texture(Native_Texture *texture);
     // The GPU copy of a texture, made the first time it's drawn.
     const Native_Texture *find_texture(const Texture &texture);
+    // The GPU copy of a mesh, recorded into the frame's uploads the first time it's
+    // drawn. Returns nullptr when the mesh can't be drawn this frame (logged).
+    const Native_Mesh *find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame);
     void destroy_swapchain_resources();
     // Ends the frame's commands, submits and presents it. With `capture` the frame is
     // also copied to capture_buffer: returns whether it was, so that waiting for the
@@ -161,6 +189,13 @@ public:
     Native_Texture        textures[MAX_TEXTURES];
     u32                   texture_count      = 0;
 
+    // Device-local vertices and indices of every mesh drawn so far, never freed.
+    VkBuffer       mesh_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory mesh_memory = VK_NULL_HANDLE;
+    u64            mesh_used   = 0;
+    Native_Mesh    meshes[MESH_SLOTS]; // Open addressing on the vertices' address
+    u32            mesh_count  = 0;
+
     // Frames read back for screenshots: copied to a host-visible buffer, then
     // converted to RGBA in capture_pixels. Made for the first capture.
     VkBuffer        capture_buffer = VK_NULL_HANDLE;
@@ -175,7 +210,8 @@ public:
     u32  image_index   = 0;
     bool frame_started = false;
     bool ready         = false;
-    bool stream_full_logged   = false;
+    bool mesh_too_big_logged  = false;
+    bool meshes_full_logged   = false;
     bool textures_full_logged = false;
 };
 
@@ -234,6 +270,9 @@ Renderer::~Renderer()
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
         if (n->upload_pool)        vkDestroyCommandPool(n->device, n->upload_pool, nullptr);
 
+        if (n->mesh_buffer) vkDestroyBuffer(n->device, n->mesh_buffer, nullptr);
+        if (n->mesh_memory) vkFreeMemory(n->device, n->mesh_memory, nullptr);
+
         if (n->capture_buffer) vkDestroyBuffer(n->device, n->capture_buffer, nullptr);
         if (n->capture_memory) vkFreeMemory(n->device, n->capture_memory, nullptr); // Unmaps it
 
@@ -245,8 +284,8 @@ Renderer::~Renderer()
             if (frame.in_flight)      vkDestroyFence(n->device, frame.in_flight, nullptr);
             if (frame.image_acquired) vkDestroySemaphore(n->device, frame.image_acquired, nullptr);
             if (frame.command_pool)   vkDestroyCommandPool(n->device, frame.command_pool, nullptr);
-            if (frame.stream_buffer)  vkDestroyBuffer(n->device, frame.stream_buffer, nullptr);
-            if (frame.stream_memory)  vkFreeMemory(n->device, frame.stream_memory, nullptr); // Unmaps it
+            if (frame.staging_buffer) vkDestroyBuffer(n->device, frame.staging_buffer, nullptr);
+            if (frame.staging_memory) vkFreeMemory(n->device, frame.staging_memory, nullptr); // Unmaps it
         }
 
         vkDestroyDevice(n->device, nullptr);
@@ -307,8 +346,9 @@ bool Renderer::begin_frame(const Vector4 &clear_color)
     }
 
     vkResetFences(n->device, 1, &frame.in_flight);
-    vkResetCommandPool(n->device, frame.command_pool, 0);
-    frame.stream_used = 0;
+    vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
+    frame.uploading    = false;
+    frame.staging_used = 0;
 
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -415,30 +455,11 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
 
     Native_Renderer_Frame &frame = n->frames[n->frame_index];
 
-    // Vertices, then indices, both at 16-byte aligned offsets.
-    auto align = [](u64 value) { return (value + 15) & ~(u64)15; };
-    u64 vertices_size  = (u64)mesh.vertex_count * sizeof(Mesh_Vertex);
-    u64 indices_size   = (u64)mesh.index_count * sizeof(u32);
-    u64 vertex_offset  = frame.stream_used;
-    u64 index_offset   = align(vertex_offset + vertices_size);
-    u64 end            = align(index_offset + indices_size);
-
-    if (end > STREAM_BUFFER_SIZE)
-    {
-        if (!n->stream_full_logged)
-        {
-            log_warn("Meshes past %llu MiB a frame aren't drawn", (unsigned long long)(STREAM_BUFFER_SIZE / MiB));
-            n->stream_full_logged = true;
-        }
-        return;
-    }
+    const Native_Mesh *native_mesh = n->find_mesh(mesh, frame);
+    if (!native_mesh) return;
 
     // Before anything is recorded for the mesh: a texture's first draw uploads it.
     const Native_Texture *native_texture = n->find_texture(texture);
-
-    memcpy(frame.stream_mapped + vertex_offset, mesh.vertices, vertices_size);
-    memcpy(frame.stream_mapped + index_offset,  mesh.indices,  indices_size);
-    frame.stream_used = end;
 
     Mesh_Push_Constants push = {};
     push.model_view_projection = view_projection * transform;
@@ -450,10 +471,10 @@ void Renderer::draw_mesh(const Mesh &mesh, const Matrix4 &transform, const Matri
             push.normal_matrix[column][row] = normals.at(row, column);
 
     VkCommandBuffer command_buffer = frame.command_buffer;
-    VkDeviceSize    offset         = vertex_offset;
+    VkDeviceSize    offset         = native_mesh->vertex_offset;
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
-    vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.stream_buffer, &offset);
-    vkCmdBindIndexBuffer(command_buffer, frame.stream_buffer, index_offset, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(command_buffer, 0, 1, &n->mesh_buffer, &offset);
+    vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline_layout,
                             0, 1, &native_texture->descriptor_set, 0, nullptr);
     vkCmdPushConstants(command_buffer, n->mesh_pipeline_layout,
@@ -531,6 +552,26 @@ bool Native_Renderer::finish_frame(bool capture)
 
     vkEndCommandBuffer(frame.command_buffer);
 
+    if (frame.uploading)
+    {
+        // Covers the draws of this frame and the later ones, which come after it in
+        // submission order.
+        VkMemoryBarrier2 to_vertex_input = {
+            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+            .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT,
+        };
+        VkDependencyInfo upload_dependency = {
+            .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers    = &to_vertex_input,
+        };
+        vkCmdPipelineBarrier2(frame.upload_command_buffer, &upload_dependency);
+        vkEndCommandBuffer(frame.upload_command_buffer);
+    }
+
     VkSemaphoreSubmitInfo wait_info = {
         .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
         .semaphore = frame.image_acquired,
@@ -541,16 +582,17 @@ bool Native_Renderer::finish_frame(bool capture)
         .semaphore = this->render_finished[this->image_index],
         .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
-    VkCommandBufferSubmitInfo command_buffer_info = {
-        .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-        .commandBuffer = frame.command_buffer,
+    // The uploads first, when there are any.
+    VkCommandBufferSubmitInfo command_buffer_infos[2] = {
+        { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = frame.upload_command_buffer },
+        { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = frame.command_buffer },
     };
     VkSubmitInfo2 submit = {
         .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
         .waitSemaphoreInfoCount   = 1,
         .pWaitSemaphoreInfos      = &wait_info,
-        .commandBufferInfoCount   = 1,
-        .pCommandBufferInfos      = &command_buffer_info,
+        .commandBufferInfoCount   = frame.uploading ? 2u : 1u,
+        .pCommandBufferInfos      = frame.uploading ? &command_buffer_infos[0] : &command_buffer_infos[1],
         .signalSemaphoreInfoCount = 1,
         .pSignalSemaphoreInfos    = &signal_info,
     };
@@ -925,6 +967,7 @@ bool Native_Renderer::create_frames()
             .commandBufferCount = 1,
         };
         if (!vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &frame.command_buffer), "vkAllocateCommandBuffers")) return false;
+        if (!vk_check(vkAllocateCommandBuffers(this->device, &allocate_info, &frame.upload_command_buffer), "vkAllocateCommandBuffers")) return false;
 
         VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         if (!vk_check(vkCreateSemaphore(this->device, &semaphore_info, nullptr, &frame.image_acquired), "vkCreateSemaphore")) return false;
@@ -937,14 +980,16 @@ bool Native_Renderer::create_frames()
         if (!vk_check(vkCreateFence(this->device, &fence_info, nullptr, &frame.in_flight), "vkCreateFence")) return false;
 
         // Coherent, so writes need no flush before the submit.
-        if (!this->create_buffer(STREAM_BUFFER_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        if (!this->create_buffer(STAGING_BUFFER_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                 &frame.stream_buffer, &frame.stream_memory)) return false;
-        if (!vk_check(vkMapMemory(this->device, frame.stream_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.stream_mapped),
+                                 &frame.staging_buffer, &frame.staging_memory)) return false;
+        if (!vk_check(vkMapMemory(this->device, frame.staging_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.staging_mapped),
                       "vkMapMemory")) return false;
     }
 
-    return true;
+    return this->create_buffer(MESH_BUFFER_SIZE,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &this->mesh_buffer, &this->mesh_memory);
 }
 
 u32 Native_Renderer::find_memory_type(u32 type_bits, VkMemoryPropertyFlags properties)
@@ -1293,6 +1338,87 @@ const Native_Texture *Native_Renderer::find_texture(const Texture &texture)
     }
 
     return found->descriptor_set ? found : &this->white_texture;
+}
+
+const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame)
+{
+    if (!mesh.vertices || !mesh.indices) return nullptr;
+
+    // Fibonacci hashing of the address: the low bits are alignment, always zero.
+    u32 slot = (u32)(((u64)(uintptr_t)mesh.vertices * 11400714819323198485ull) >> (64 - MESH_SLOT_BITS));
+
+    for (;; slot = (slot + 1) & (MESH_SLOTS - 1))
+    {
+        const Native_Mesh &candidate = this->meshes[slot];
+        if (!candidate.vertices) break;
+        if (candidate.vertices == mesh.vertices && candidate.indices == mesh.indices &&
+            candidate.vertex_count == mesh.vertex_count && candidate.index_count == mesh.index_count)
+            return &candidate;
+    }
+
+    // Not uploaded yet: vertices, then indices, both at 16-byte aligned offsets, laid
+    // out the same in the staging buffer and in mesh_buffer so one copy moves both.
+    auto align = [](u64 value) { return (value + 15) & ~(u64)15; };
+    u64 vertices_size = (u64)mesh.vertex_count * sizeof(Mesh_Vertex);
+    u64 indices_size  = (u64)mesh.index_count * sizeof(u32);
+    u64 indices_start = align(vertices_size);
+    u64 size          = align(indices_start + indices_size);
+
+    if (size > STAGING_BUFFER_SIZE)
+    {
+        if (!this->mesh_too_big_logged)
+        {
+            log_warn("Meshes bigger than %llu MiB aren't drawn", (unsigned long long)(STAGING_BUFFER_SIZE / MiB));
+            this->mesh_too_big_logged = true;
+        }
+        return nullptr;
+    }
+    if (this->mesh_count == MAX_MESHES || size > MESH_BUFFER_SIZE - this->mesh_used)
+    {
+        if (!this->meshes_full_logged)
+        {
+            log_warn("Meshes past the first %u or %llu MiB aren't drawn", MAX_MESHES,
+                     (unsigned long long)(MESH_BUFFER_SIZE / MiB));
+            this->meshes_full_logged = true;
+        }
+        return nullptr;
+    }
+    // Staging is full for this frame: the mesh waits for the next one.
+    if (size > STAGING_BUFFER_SIZE - frame.staging_used) return nullptr;
+
+    u8 *staged = frame.staging_mapped + frame.staging_used;
+    memcpy(staged,                 mesh.vertices, vertices_size);
+    memcpy(staged + indices_start, mesh.indices,  indices_size);
+
+    if (!frame.uploading)
+    {
+        VkCommandBufferBeginInfo begin_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        vkBeginCommandBuffer(frame.upload_command_buffer, &begin_info);
+        frame.uploading = true;
+    }
+
+    VkBufferCopy copy = {
+        .srcOffset = frame.staging_used,
+        .dstOffset = this->mesh_used,
+        .size      = size,
+    };
+    vkCmdCopyBuffer(frame.upload_command_buffer, frame.staging_buffer, this->mesh_buffer, 1, &copy);
+
+    Native_Mesh *created = &this->meshes[slot];
+    created->vertices      = mesh.vertices;
+    created->indices       = mesh.indices;
+    created->vertex_count  = mesh.vertex_count;
+    created->index_count   = mesh.index_count;
+    created->vertex_offset = this->mesh_used;
+    created->index_offset  = this->mesh_used + indices_start;
+
+    frame.staging_used += size;
+    this->mesh_used    += size;
+    this->mesh_count   += 1;
+    return created;
 }
 
 VkShaderModule Native_Renderer::create_shader_module(const u32 *code, u64 size)

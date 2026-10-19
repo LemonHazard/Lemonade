@@ -29,8 +29,9 @@ struct Render_Command_Header
 struct Render_Command_Draw_Mesh
 {
     Render_Command_Header header;
-    // Read when the frame is drawn, after the game's update returns: the vertices and
-    // indices must still be there then (in the game's memory, not on its stack).
+    // Read when the frame that first draws it is drawn, after the game's update
+    // returns: the vertices and indices must still be there then (in the game's
+    // memory, not on its stack). Later frames draw the renderer's copy (see mesh.h).
     Mesh    mesh;
     Matrix4 transform; // Model to world
     Vector4 color;     // Linear color, multiplied by the texture's
