@@ -11,15 +11,19 @@ layout(set = 0, binding = 0) uniform sampler2D scene;
 
 layout(location = 0) out vec4 out_color;
 
-// Fits colors into 0..1 for the display. Below 0.8 they stay as they are, so the base
-// colors of textures show unchanged; brighter ones are compressed towards 1 and
-// desaturated towards white, as bright light looks. This is the shoulder of Khronos'
-// PBR Neutral tonemapper, without its toe: that darkens the darkest colors to cancel
-// the reflection PBR adds to every surface, and there's no such reflection yet.
+// Fits colors into 0..1 for the display: Khronos' PBR Neutral tonemapper. Base colors
+// of textures, lit by white light of 1, come out as they are: below 0.8 colors only
+// lose the 4% every surface reflects (its toe darkens the darkest more gently), and
+// brighter ones are compressed towards 1 and desaturated towards white, as bright light
+// looks.
 vec3 tonemap(vec3 color)
 {
-    const float start_compression = 0.8;
+    const float start_compression = 0.8 - 0.04;
     const float desaturation      = 0.15;
+
+    float darkest = min(color.r, min(color.g, color.b));
+    float offset  = darkest < 0.08 ? darkest - 6.25 * darkest * darkest : 0.04;
+    color -= offset;
 
     float peak = max(color.r, max(color.g, color.b));
     if (peak < start_compression) return color;

@@ -5,8 +5,9 @@
 
 // How a frame's meshes are lit: a sun, and light from the sky and the ground that
 // reaches everything. Colors are linear and include their intensity, so they can go
-// past 1: the frame is tonemapped to fit the display, which leaves colors below 0.8 as
-// they are and compresses brighter ones.
+// past 1: each is what a white, rough, non-metallic surface facing it reflects. The
+// frame is tonemapped to fit the display, with Khronos' PBR Neutral: colors below 0.8
+// stay nearly as they are, brighter ones are compressed.
 
 struct Lighting
 {
