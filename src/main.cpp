@@ -199,6 +199,7 @@ int main(int argc, char **argv)
         auto time = std::chrono::steady_clock::now();
 
         render_commands.clear_color     = clear_color;
+        render_commands.sky_background  = false;
         render_commands.view_projection = identity();
         render_commands.camera_position = {};
         render_commands.lighting        = default_lighting();

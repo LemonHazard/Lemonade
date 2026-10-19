@@ -20,6 +20,8 @@ layout(set = 0, binding = 0) uniform Frame
     vec4 sky_color;
     vec4 ground_color;
     vec4 shadow;
+    vec4 horizon_color;
+    mat4 inverse_view_projection;
 } frame;
 
 layout(location = 0) in vec3 in_position;

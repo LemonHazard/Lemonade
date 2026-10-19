@@ -20,11 +20,18 @@ layout(set = 0, binding = 0) uniform Frame
     vec4 sky_color;
     vec4 ground_color;
     vec4 shadow;                // x: 1 when shadows are on; y: normal offset, in world units; z: a texel, in UV
+    vec4 horizon_color;
+    mat4 inverse_view_projection;
 } frame;
 
 // Depths seen from the sun: comparing samples tell how much of them is nearer than the
 // reference, bilinearly filtered. Outside it, nothing is shadowed.
 layout(set = 0, binding = 1) uniform sampler2DShadow shadow_map;
+
+// The sky as surfaces reflect it (see environment.frag): specularly, a mip level for
+// each step of roughness from 0 to 1, and diffusely, by the direction they face.
+layout(set = 0, binding = 2) uniform samplerCube environment;
+layout(set = 0, binding = 3) uniform samplerCube irradiance;
 
 // The material's textures: colors sRGB, so samples come out linear; white, or flat
 // normals, for those it doesn't have.
@@ -124,12 +131,6 @@ vec3 environment_reflectance(vec3 f0, float roughness, float n_dot_v)
     return f0 * ab.x + ab.y;
 }
 
-// The sky's and the ground's light coming from `direction`: a blend from one to the other.
-vec3 ambient_light(vec3 direction)
-{
-    return mix(frame.ground_color.rgb, frame.sky_color.rgb, direction.y * 0.5 + 0.5);
-}
-
 void main()
 {
     vec3 vertex_normal = normalize(in_normal);
@@ -150,13 +151,15 @@ void main()
     vec3 sun = frame.sun_color.rgb * sun_visibility(in_position, vertex_normal);
 
     // The sky and the ground light it diffusely from where it faces, and are reflected
-    // from where the view bounces to: rough surfaces blur that towards where they face.
+    // from where the view bounces to, blurred by roughness.
     float n_dot_v    = max(dot(normal, to_eye), 1e-4);
     vec3  specular   = environment_reflectance(f0, roughness, n_dot_v);
-    vec3  reflection = normalize(mix(reflect(-to_eye, normal), normal, roughness * roughness));
+    vec3  reflection = reflect(-to_eye, normal);
+    float levels     = float(textureQueryLevels(environment) - 1);
+    vec3  sky        = textureLod(environment, reflection, roughness * levels).rgb;
 
-    vec3 diffuse_light  = sun * sun_diffuse + (1.0 - specular) * diffuse_color * ambient_light(normal);
-    vec3 specular_light = sun * sun_specular + specular * ambient_light(reflection);
+    vec3 diffuse_light  = sun * sun_diffuse + (1.0 - specular) * diffuse_color * texture(irradiance, normal).rgb;
+    vec3 specular_light = sun * sun_specular + specular * sky;
     vec3 emitted        = push.emissive_metallic.rgb * texture(emissive_texture, in_uv).rgb;
 
     // Cut-outs, after the derivatives above, which discarding would leave undefined.

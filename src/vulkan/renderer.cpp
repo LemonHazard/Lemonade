@@ -37,6 +37,15 @@ static const u32 tonemap_vert_spv[] =
 static const u32 tonemap_frag_spv[] =
 #include "tonemap.frag.inc"
 ;
+static const u32 sky_vert_spv[] =
+#include "sky.vert.inc"
+;
+static const u32 sky_frag_spv[] =
+#include "sky.frag.inc"
+;
+static const u32 environment_frag_spv[] =
+#include "environment.frag.inc"
+;
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
@@ -73,6 +82,12 @@ constexpr u32 SHADOW_MAP_SIZE      = 2048;
 // Surfaces look themselves up in the shadow map this many texels off along their
 // normal, so they don't shadow themselves.
 constexpr r32 SHADOW_NORMAL_OFFSET = 2.0f;
+// The sky as surfaces reflect it, in cube maps of linear colors that can go past 1:
+// specularly, with a mip level for each step of roughness from 0 to 1, and diffusely.
+// The sky is smooth, so they can be small.
+constexpr u32 ENVIRONMENT_SIZE     = 128;
+constexpr u32 ENVIRONMENT_LEVELS   = 6; // 128 down to 4 pixels across
+constexpr u32 IRRADIANCE_SIZE      = 16;
 
 // Matches the uniform blocks in shaders/mesh.vert and mesh.frag (std140: vec3s padded
 // to vec4s).
@@ -86,6 +101,28 @@ struct Frame_Uniforms
     Vector4 sky_color;
     Vector4 ground_color;
     Vector4 shadow;                // 1 when on, the normal offset in world units, a texel in UV, unused
+    Vector4 horizon_color;
+    Matrix4 inverse_view_projection;
+};
+
+// A cube map to render into, face by face and level by level, and sample.
+struct Cube_Map
+{
+    VkImage        image  = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView    view   = VK_NULL_HANDLE;                // All of it, to sample
+    VkImageView    face_views[6 * ENVIRONMENT_LEVELS] = {}; // Level * 6 + face, to render into
+    u32            size   = 0;                             // Of its faces' first level
+    u32            levels = 0;
+};
+
+// Matches the push constant block in shaders/environment.frag.
+struct Environment_Push_Constants
+{
+    u32 face;
+    r32 size;
+    r32 roughness;
+    u32 irradiance;
 };
 
 struct Native_Renderer_Frame
@@ -227,6 +264,12 @@ public:
     bool create_frames();
     bool create_texture_resources();
     bool create_shadow_resources();
+    bool create_environment_resources();
+    bool create_cube_map(u32 size, u32 levels, Cube_Map *cube);
+    void destroy_cube_map(Cube_Map *cube);
+    // Renders the sky's light into environment_map and irradiance_map, from the frame's
+    // uniforms, leaving them ready to be sampled.
+    void record_environment(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     bool create_frame_descriptors();
     bool create_pipelines();
     bool create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline);
@@ -336,6 +379,16 @@ public:
     VkPipeline       shadow_pipeline         = VK_NULL_HANDLE;
     VkPipelineLayout tonemap_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       tonemap_pipeline        = VK_NULL_HANDLE;
+    VkPipelineLayout environment_pipeline_layout = VK_NULL_HANDLE;
+    VkPipeline       environment_pipeline        = VK_NULL_HANDLE;
+    VkPipelineLayout sky_pipeline_layout         = VK_NULL_HANDLE;
+    VkPipeline       sky_pipeline                = VK_NULL_HANDLE;
+
+    // The sky's maps, remade when its colors change: sky, horizon, ground.
+    Cube_Map         environment_map;
+    Cube_Map         irradiance_map;
+    Vector3          environment_colors[3] = {};
+    bool             environment_made      = false;
     VkDescriptorSet  tonemap_set             = VK_NULL_HANDLE; // hdr_image, from frame_pool
     r32              exposure                = 1.0f;           // This frame's
 
@@ -410,6 +463,7 @@ Renderer::Renderer(Window &window)
            && this->native->create_frames()
            && this->native->create_texture_resources()
            && this->native->create_shadow_resources()
+           && this->native->create_environment_resources()
            && this->native->create_frame_descriptors()
            && this->native->create_pipelines();
 
@@ -452,6 +506,12 @@ Renderer::~Renderer()
         if (n->sampler)            vkDestroySampler(n->device, n->sampler, nullptr);
 
         n->destroy_attachment(&n->shadow_image, &n->shadow_memory, &n->shadow_view);
+        n->destroy_cube_map(&n->environment_map);
+        n->destroy_cube_map(&n->irradiance_map);
+        if (n->environment_pipeline)        vkDestroyPipeline(n->device, n->environment_pipeline, nullptr);
+        if (n->environment_pipeline_layout) vkDestroyPipelineLayout(n->device, n->environment_pipeline_layout, nullptr);
+        if (n->sky_pipeline)                vkDestroyPipeline(n->device, n->sky_pipeline, nullptr);
+        if (n->sky_pipeline_layout)         vkDestroyPipelineLayout(n->device, n->sky_pipeline_layout, nullptr);
         if (n->shadow_sampler) vkDestroySampler(n->device, n->shadow_sampler, nullptr);
 
         if (n->mesh_buffer) vkDestroyBuffer(n->device, n->mesh_buffer, nullptr);
@@ -572,6 +632,8 @@ bool Renderer::begin_frame(const Render_Commands &commands)
         .ground_color          = to_vector4(lighting.ground_color),
         .shadow                = { n->shadows_on ? 1.0f : 0.0f, SHADOW_NORMAL_OFFSET * shadow_texel,
                                    1.0f / (r32)SHADOW_MAP_SIZE, 0.0f },
+        .horizon_color         = to_vector4(lighting.horizon_color),
+        .inverse_view_projection = inverse(commands.view_projection),
     };
     n->exposure        = lighting.exposure;
     n->camera_position = commands.camera_position;
@@ -587,6 +649,15 @@ bool Renderer::begin_frame(const Render_Commands &commands)
     vkBeginCommandBuffer(frame.shadow_command_buffer, &begin_info);
     n->begin_shadow_pass(frame.shadow_command_buffer);
     vkBeginCommandBuffer(frame.command_buffer, &begin_info);
+
+    // The sky's maps, the first time and when its colors change.
+    const Vector3 sky_colors[3] = { lighting.sky_color, lighting.horizon_color, lighting.ground_color };
+    if (!n->environment_made || memcmp(sky_colors, n->environment_colors, sizeof(sky_colors)) != 0)
+    {
+        n->record_environment(frame.command_buffer, frame);
+        memcpy(n->environment_colors, sky_colors, sizeof(sky_colors));
+        n->environment_made = true;
+    }
 
     const VkPipelineStageFlags2 depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
@@ -666,6 +737,14 @@ bool Renderer::begin_frame(const Render_Commands &commands)
     VkRect2D scissor = { { 0, 0 }, n->swapchain_extent };
     vkCmdSetViewport(frame.command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(frame.command_buffer, 0, 1, &scissor);
+
+    if (commands.sky_background)
+    {
+        vkCmdBindPipeline(frame.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->sky_pipeline);
+        vkCmdBindDescriptorSets(frame.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->sky_pipeline_layout,
+                                0, 1, &frame.descriptor_set, 0, nullptr);
+        vkCmdDraw(frame.command_buffer, 3, 1, 0, 0);
+    }
 
     n->frame_started = true;
     return true;
@@ -1631,25 +1710,184 @@ bool Native_Renderer::create_shadow_resources()
     return vk_check(vkCreateSampler(this->device, &sampler_info, nullptr, &this->shadow_sampler), "vkCreateSampler");
 }
 
+bool Native_Renderer::create_environment_resources()
+{
+    return this->create_cube_map(ENVIRONMENT_SIZE, ENVIRONMENT_LEVELS, &this->environment_map)
+        && this->create_cube_map(IRRADIANCE_SIZE, 1, &this->irradiance_map);
+}
+
+bool Native_Renderer::create_cube_map(u32 size, u32 levels, Cube_Map *cube)
+{
+    cube->size   = size;
+    cube->levels = levels;
+
+    VkImageCreateInfo image_info = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = HDR_FORMAT,
+        .extent        = { size, size, 1 },
+        .mipLevels     = levels,
+        .arrayLayers   = 6,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, &cube->image), "vkCreateImage")) return false;
+
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(this->device, cube->image, &requirements);
+
+    u32 memory_type = this->find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memory_type == UINT32_MAX) memory_type = this->find_memory_type(requirements.memoryTypeBits, 0);
+
+    VkMemoryAllocateInfo allocate = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = requirements.size,
+        .memoryTypeIndex = memory_type,
+    };
+    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, &cube->memory), "vkAllocateMemory")) return false;
+    if (!vk_check(vkBindImageMemory(this->device, cube->image, cube->memory, 0), "vkBindImageMemory")) return false;
+
+    VkImageViewCreateInfo view_info = {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = cube->image,
+        .viewType         = VK_IMAGE_VIEW_TYPE_CUBE,
+        .format           = HDR_FORMAT,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 6 },
+    };
+    if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &cube->view), "vkCreateImageView")) return false;
+
+    for (u32 level = 0; level < levels; ++level)
+    {
+        for (u32 face = 0; face < 6; ++face)
+        {
+            view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, level, 1, face, 1 };
+            if (!vk_check(vkCreateImageView(this->device, &view_info, nullptr, &cube->face_views[level * 6 + face]),
+                          "vkCreateImageView")) return false;
+        }
+    }
+    return true;
+}
+
+void Native_Renderer::destroy_cube_map(Cube_Map *cube)
+{
+    for (VkImageView view : cube->face_views)
+        if (view) vkDestroyImageView(this->device, view, nullptr);
+    if (cube->view)   vkDestroyImageView(this->device, cube->view, nullptr);
+    if (cube->image)  vkDestroyImage(this->device, cube->image, nullptr);
+    if (cube->memory) vkFreeMemory(this->device, cube->memory, nullptr);
+    *cube = {};
+}
+
+void Native_Renderer::record_environment(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
+{
+    // After the previous frames' draws sampled them.
+    auto barrier = [&](VkImageLayout old_layout, VkImageLayout new_layout,
+                       VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                       VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
+    {
+        VkImageMemoryBarrier2 barriers[2];
+        const Cube_Map *cubes[2] = { &this->environment_map, &this->irradiance_map };
+        for (u32 i = 0; i < 2; ++i)
+        {
+            barriers[i] = {
+                .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask        = src_stage,
+                .srcAccessMask       = src_access,
+                .dstStageMask        = dst_stage,
+                .dstAccessMask       = dst_access,
+                .oldLayout           = old_layout,
+                .newLayout           = new_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image               = cubes[i]->image,
+                .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, cubes[i]->levels, 0, 6 },
+            };
+        }
+        VkDependencyInfo dependency = {
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 2,
+            .pImageMemoryBarriers    = barriers,
+        };
+        vkCmdPipelineBarrier2(command_buffer, &dependency);
+    };
+
+    const VkPipelineStageFlags2 color_output = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const VkPipelineStageFlags2 fragment     = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            fragment, 0, color_output, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->environment_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->environment_pipeline_layout,
+                            0, 1, &frame.descriptor_set, 0, nullptr);
+
+    // Each face of each level is drawn over whole.
+    auto draw_face = [&](const Cube_Map &cube, u32 level, u32 face, const Environment_Push_Constants &push)
+    {
+        u32 size = cube.size >> level;
+        VkRenderingAttachmentInfo color_attachment = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = cube.face_views[level * 6 + face],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        VkRenderingInfo rendering = {
+            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea           = { { 0, 0 }, { size, size } },
+            .layerCount           = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &color_attachment,
+        };
+        vkCmdBeginRendering(command_buffer, &rendering);
+
+        VkViewport viewport = { 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
+        VkRect2D   scissor  = { { 0, 0 }, { size, size } };
+        vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+        vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+        vkCmdPushConstants(command_buffer, this->environment_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDraw(command_buffer, 3, 1, 0, 0);
+
+        vkCmdEndRendering(command_buffer);
+    };
+
+    for (u32 level = 0; level < ENVIRONMENT_LEVELS; ++level)
+    {
+        for (u32 face = 0; face < 6; ++face)
+        {
+            r32 roughness = (r32)level / (r32)(ENVIRONMENT_LEVELS - 1);
+            draw_face(this->environment_map, level, face, { face, (r32)(ENVIRONMENT_SIZE >> level), roughness, 0 });
+        }
+    }
+    for (u32 face = 0; face < 6; ++face)
+        draw_face(this->irradiance_map, 0, face, { face, (r32)IRRADIANCE_SIZE, 1.0f, 1 });
+
+    barrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            color_output, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, fragment, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+}
+
 bool Native_Renderer::create_frame_descriptors()
 {
-    VkDescriptorSetLayoutBinding bindings[2] = {
-        {
-            .binding         = 0, // Frame_Uniforms
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    // Frame_Uniforms, then the shadow map, environment_map and irradiance_map.
+    VkDescriptorSetLayoutBinding bindings[4];
+    for (u32 i = 0; i < 4; ++i)
+    {
+        bindings[i] = {
+            .binding         = i,
+            .descriptorType  = i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        {
-            .binding         = 1, // The shadow map
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-    };
+            .stageFlags      = (VkShaderStageFlags)(i == 0 ? VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+                                                          : VK_SHADER_STAGE_FRAGMENT_BIT),
+        };
+    }
     VkDescriptorSetLayoutCreateInfo layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 2,
+        .bindingCount = 4,
         .pBindings    = bindings,
     };
     if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->frame_set_layout),
@@ -1658,7 +1896,7 @@ bool Native_Renderer::create_frame_descriptors()
     // A set per frame, and the tonemapping's.
     VkDescriptorPoolSize pool_sizes[2] = {
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         .descriptorCount = FRAMES_IN_FLIGHT },
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = FRAMES_IN_FLIGHT + 1 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 3 * FRAMES_IN_FLIGHT + 1 },
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1690,7 +1928,17 @@ bool Native_Renderer::create_frame_descriptors()
             .imageView   = this->shadow_view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
-        VkWriteDescriptorSet writes[2] = {
+        VkDescriptorImageInfo environment_descriptor = {
+            .sampler     = this->sampler,
+            .imageView   = this->environment_map.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkDescriptorImageInfo irradiance_descriptor = {
+            .sampler     = this->sampler,
+            .imageView   = this->irradiance_map.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet writes[4] = {
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = frame.descriptor_set,
@@ -1707,8 +1955,24 @@ bool Native_Renderer::create_frame_descriptors()
                 .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 .pImageInfo      = &shadow_descriptor,
             },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.descriptor_set,
+                .dstBinding      = 2,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &environment_descriptor,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.descriptor_set,
+                .dstBinding      = 3,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &irradiance_descriptor,
+            },
         };
-        vkUpdateDescriptorSets(this->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(this->device, 4, writes, 0, nullptr);
     }
 
     // Of hdr_image: written by create_swapchain(), which makes it.
@@ -2150,6 +2414,59 @@ bool Native_Renderer::create_pipelines()
         .cull_mode     = VK_CULL_MODE_NONE,
     };
     if (!this->create_graphics_pipeline(tonemap, &this->tonemap_pipeline)) return false;
+
+    // The sky's maps: a screen-covering triangle for each face, reading the frame's uniforms.
+    VkPushConstantRange environment_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(Environment_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo environment_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->frame_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &environment_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &environment_layout_info, nullptr, &this->environment_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    Pipeline_Description environment = {
+        .vertex_code   = tonemap_vert_spv,
+        .vertex_size   = sizeof(tonemap_vert_spv),
+        .fragment_code = environment_frag_spv,
+        .fragment_size = sizeof(environment_frag_spv),
+        .vertex_input  = &no_vertex_input,
+        .layout        = this->environment_pipeline_layout,
+        .color_format  = HDR_FORMAT,
+        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
+    };
+    if (!this->create_graphics_pipeline(environment, &this->environment_pipeline)) return false;
+
+    // The sky behind the scene, drawn first, in the scene's attachments.
+    VkPipelineLayoutCreateInfo sky_layout_info = {
+        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts    = &this->frame_set_layout,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &sky_layout_info, nullptr, &this->sky_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    Pipeline_Description sky = {
+        .vertex_code   = sky_vert_spv,
+        .vertex_size   = sizeof(sky_vert_spv),
+        .fragment_code = sky_frag_spv,
+        .fragment_size = sizeof(sky_frag_spv),
+        .vertex_input  = &no_vertex_input,
+        .layout        = this->sky_pipeline_layout,
+        .color_format  = HDR_FORMAT,
+        .depth_format  = this->depth_format,
+        .depth_test    = false,
+        .cull_mode     = VK_CULL_MODE_NONE,
+    };
+    if (!this->create_graphics_pipeline(sky, &this->sky_pipeline)) return false;
 
     VkPushConstantRange push_constants = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

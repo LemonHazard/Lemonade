@@ -46,8 +46,9 @@ struct Render_Commands
 {
     // For every mesh in the frame, reset by the engine each frame.
     Vector4  clear_color;     // Linear color
+    bool     sky_background;  // Draws the lighting's sky and sun behind everything, over the clear color (off by default)
     Matrix4  view_projection; // World to clip space (identity by default)
-    Vector3  camera_position; // World space, for light reflected towards it (none yet); the origin by default
+    Vector3  camera_position; // World space, for light reflected towards it; the origin by default
     Lighting lighting;        // default_lighting() by default
 
     u8      *buffer;
