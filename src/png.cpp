@@ -81,3 +81,71 @@ u64 load_png(const char *path, Texture *texture, void *storage, u64 storage_size
 
     return used;
 }
+
+// stb_image_write encodes them. Its functions are kept private to this file, and the
+// file is written here, to log failures like load_png().
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#define STBI_WRITE_NO_STDIO
+#include <stb_image_write.h>
+
+static void append_to_vector(void *context, void *data, int size)
+{
+    auto *out = (std::vector<u8> *)context;
+    out->insert(out->end(), (const u8 *)data, (const u8 *)data + size);
+}
+
+std::vector<u8> encode_png(const Texture &image)
+{
+    std::vector<u8> png;
+    if (!image.pixels || image.width == 0 || image.height == 0) return png;
+    if (image.width > INT_MAX / 4 || image.height > INT_MAX) return png;
+
+    u64 pixel_count = (u64)image.width * image.height;
+    bool opaque = true;
+    for (u64 i = 0; i < pixel_count && opaque; ++i) opaque = image.pixels[i * 4 + 3] == 255;
+
+    // Without alpha, the pixels are packed as RGB first.
+    const u8 *pixels = image.pixels;
+    std::vector<u8> rgb;
+    if (opaque)
+    {
+        rgb.resize(pixel_count * 3);
+        for (u64 i = 0; i < pixel_count; ++i)
+        {
+            rgb[i * 3 + 0] = image.pixels[i * 4 + 0];
+            rgb[i * 3 + 1] = image.pixels[i * 4 + 1];
+            rgb[i * 3 + 2] = image.pixels[i * 4 + 2];
+        }
+        pixels = rgb.data();
+    }
+
+    int channels = opaque ? 3 : 4;
+    if (!stbi_write_png_to_func(append_to_vector, &png, (int)image.width, (int)image.height, channels, pixels,
+                                (int)image.width * channels))
+        png.clear();
+
+    return png;
+}
+
+bool save_png(const char *path, const Texture &image)
+{
+    std::vector<u8> png = encode_png(image);
+    if (png.empty())
+    {
+        log_error("Could not save \"%s\": the image can't be encoded", path);
+        return false;
+    }
+
+    FILE *file = fopen(path, "wb");
+    bool ok = file && fwrite(png.data(), 1, png.size(), file) == png.size();
+    if (file && fclose(file) != 0) ok = false;
+
+    if (ok)
+        log_info("Saved \"%s\": %ux%u", path, image.width, image.height);
+    else
+        log_error("Could not write \"%s\"", path);
+
+    return ok;
+}
