@@ -110,6 +110,9 @@ function lemonade.engine(opts)
          engine_path("src/**.cpp"),
       }
 
+      -- png.cpp decodes with stb_image
+      includedirs { engine_path("modules/common/stb/include") }
+
       defines {
          "RENDERER_" .. renderer:upper(),
          "GAME_LIBRARY=\"" .. opts.game .. "\"",

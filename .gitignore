@@ -2,6 +2,7 @@
 obj/
 build/
 imgui.ini
+screenshots/
 *.sln
 *.vcxproj
 *.vcxproj.filters
