@@ -7,7 +7,11 @@ layout(push_constant) uniform Push
     vec4 color;
 } push;
 
+// sRGB, so samples come out linear; white for meshes drawn without a texture.
+layout(set = 0, binding = 0) uniform sampler2D albedo;
+
 layout(location = 0) in  vec3 in_normal;
+layout(location = 1) in  vec2 in_uv;
 layout(location = 0) out vec4 out_color;
 
 // Towards the light, in world space: a sun up and to the right, behind the camera.
@@ -19,5 +23,6 @@ void main()
     float diffuse = max(dot(normal, light_direction), 0.0);
     float ambient = 0.10 + 0.08 * normal.y; // Brighter from the sky than from the ground
 
-    out_color = vec4(push.color.rgb * (diffuse * 0.85 + ambient), push.color.a);
+    vec4 color = push.color * texture(albedo, in_uv);
+    out_color = vec4(color.rgb * (diffuse * 0.85 + ambient), color.a);
 }

@@ -40,7 +40,8 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             case Render_Command_Type::Draw_Mesh:
             {
                 auto *command = (const Render_Command_Draw_Mesh *)header;
-                renderer.draw_mesh(command->mesh, command->transform, commands.view_projection, command->color);
+                renderer.draw_mesh(command->mesh, command->transform, commands.view_projection, command->color,
+                                   command->texture);
                 break;
             }
         }

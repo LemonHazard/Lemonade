@@ -4,6 +4,7 @@
 #include "vector.h"
 #include "matrix.h"
 #include "mesh.h"
+#include "texture.h"
 
 #include <cstddef>
 
@@ -32,7 +33,8 @@ struct Render_Command_Draw_Mesh
     // indices must still be there then (in the game's memory, not on its stack).
     Mesh    mesh;
     Matrix4 transform; // Model to world
-    Vector4 color;     // Linear color
+    Vector4 color;     // Linear color, multiplied by the texture's
+    Texture texture;   // Also read then; none draws the color alone
 };
 
 struct Render_Commands
@@ -68,7 +70,8 @@ inline void push_test_triangle(Render_Commands *commands)
     push_render_command(commands, Render_Command_Type::Test_Triangle, sizeof(Render_Command_Header));
 }
 
-inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color)
+inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
+                      const Texture &texture = {})
 {
     auto *command = (Render_Command_Draw_Mesh *)
         push_render_command(commands, Render_Command_Type::Draw_Mesh, sizeof(Render_Command_Draw_Mesh));
@@ -77,4 +80,5 @@ inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4
     command->mesh      = mesh;
     command->transform = transform;
     command->color     = color;
+    command->texture   = texture;
 }
