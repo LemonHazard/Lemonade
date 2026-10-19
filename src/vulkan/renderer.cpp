@@ -27,6 +27,12 @@ static const u32 mesh_vert_spv[] =
 static const u32 mesh_frag_spv[] =
 #include "mesh.frag.inc"
 ;
+static const u32 tonemap_vert_spv[] =
+#include "tonemap.vert.inc"
+;
+static const u32 tonemap_frag_spv[] =
+#include "tonemap.frag.inc"
+;
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
@@ -48,6 +54,9 @@ constexpr u32 TEXTURE_SLOTS        = 1u << TEXTURE_SLOT_BITS;
 static_assert(TEXTURE_SLOTS >= 2 * MAX_TEXTURES, "The texture hash table needs empty slots to end its probes");
 // Texture pixels are sRGB-encoded, so the shaders sample linear colors.
 constexpr VkFormat TEXTURE_FORMAT  = VK_FORMAT_R8G8B8A8_SRGB;
+// The scene is rendered in linear colors that can go past 1, then tonemapped into the
+// swapchain. Every device can render to and sample this format.
+constexpr VkFormat HDR_FORMAT      = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 // Matches the uniform block in shaders/mesh.frag (std140: vec3s padded to vec4s).
 struct Frame_Uniforms
@@ -127,6 +136,12 @@ struct Mesh_Push_Constants
 };
 static_assert(sizeof(Mesh_Push_Constants) == 128, "Vulkan guarantees only 128 bytes of push constants");
 
+// Matches the push constant block in shaders/tonemap.frag.
+struct Tonemap_Push_Constants
+{
+    r32 exposure;
+};
+
 struct Pipeline_Description
 {
     const u32 *vertex_code;
@@ -135,7 +150,9 @@ struct Pipeline_Description
     u64        fragment_size;
     const VkPipelineVertexInputStateCreateInfo *vertex_input;
     VkPipelineLayout layout;
-    bool       depth_test; // Also writes depth and culls back faces
+    VkFormat   color_format; // Of the attachments it renders into
+    VkFormat   depth_format; // VK_FORMAT_UNDEFINED for none
+    bool       depth_test;   // Also writes depth and culls back faces
 };
 
 class Native_Renderer
@@ -155,7 +172,9 @@ public:
     bool create_pipelines();
     bool create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline);
     bool create_swapchain(u32 width, u32 height);
-    bool create_depth_buffer(VkExtent2D extent);
+    // An image sized like the swapchain to render into, with a view of it.
+    bool create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                           VkImage *image, VkDeviceMemory *memory, VkImageView *view);
     bool create_buffer(u64 size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                        VkBuffer *buffer, VkDeviceMemory *memory);
     // Creates the image and its descriptor set, without uploading anything. Leaves
@@ -182,6 +201,8 @@ public:
     // also copied to capture_buffer: returns whether it was, so that waiting for the
     // frame's fence leaves its pixels there.
     bool finish_frame(bool capture);
+    // Draws the scene's colors into the swapchain image, fitted to the display.
+    void record_tonemap(VkCommandBuffer command_buffer);
     bool record_capture(VkCommandBuffer command_buffer);
     VkShaderModule create_shader_module(const u32 *code, u64 size);
     // Returns UINT32_MAX when no memory type fits.
@@ -210,16 +231,23 @@ public:
     // than per frame, since present doesn't tell us when it's done with it.
     VkSemaphore    render_finished[MAX_SWAPCHAIN_IMAGES] = {};
 
-    // Sized like the swapchain. One is enough for all frames in flight: the barrier
-    // in begin_frame() waits for the previous frame's depth writes.
+    // Sized like the swapchain. One of each is enough for all frames in flight: the
+    // barriers in begin_frame() wait for the previous frame to be done with them.
     VkImage        depth_image  = VK_NULL_HANDLE;
     VkDeviceMemory depth_memory = VK_NULL_HANDLE;
     VkImageView    depth_view   = VK_NULL_HANDLE;
+    VkImage        hdr_image    = VK_NULL_HANDLE; // The scene, before it's tonemapped into the swapchain
+    VkDeviceMemory hdr_memory   = VK_NULL_HANDLE;
+    VkImageView    hdr_view     = VK_NULL_HANDLE;
 
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
     VkPipelineLayout mesh_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       mesh_pipeline        = VK_NULL_HANDLE;
+    VkPipelineLayout tonemap_pipeline_layout = VK_NULL_HANDLE;
+    VkPipeline       tonemap_pipeline        = VK_NULL_HANDLE;
+    VkDescriptorSet  tonemap_set             = VK_NULL_HANDLE; // hdr_image, from frame_pool
+    r32              exposure                = 1.0f;           // This frame's
 
     VkDescriptorSetLayout frame_set_layout   = VK_NULL_HANDLE; // Set 0 of the mesh shaders
     VkDescriptorPool      frame_pool         = VK_NULL_HANDLE;
@@ -311,6 +339,8 @@ Renderer::~Renderer()
         if (n->pipeline_layout)      vkDestroyPipelineLayout(n->device, n->pipeline_layout, nullptr);
         if (n->mesh_pipeline)        vkDestroyPipeline(n->device, n->mesh_pipeline, nullptr);
         if (n->mesh_pipeline_layout) vkDestroyPipelineLayout(n->device, n->mesh_pipeline_layout, nullptr);
+        if (n->tonemap_pipeline)        vkDestroyPipeline(n->device, n->tonemap_pipeline, nullptr);
+        if (n->tonemap_pipeline_layout) vkDestroyPipelineLayout(n->device, n->tonemap_pipeline_layout, nullptr);
 
         for (auto &texture : n->textures) n->destroy_texture(&texture);
         n->destroy_texture(&n->white_texture);
@@ -408,6 +438,7 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
         .sky_color       = to_vector4(lighting.sky_color),
         .ground_color    = to_vector4(lighting.ground_color),
     };
+    n->exposure = lighting.exposure;
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
     frame.staging_used = 0;
@@ -422,8 +453,9 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
                                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     VkImageMemoryBarrier2 to_attachment[2] = {
         {
+            // After the previous frame's tonemapping read it.
             .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
             .srcAccessMask       = 0,
             .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -431,7 +463,7 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
             .newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image               = n->images[n->image_index],
+            .image               = n->hdr_image,
             .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
         },
         {
@@ -459,7 +491,7 @@ bool Renderer::begin_frame(const Vector4 &clear_color, const Vector3 &camera_pos
 
     VkRenderingAttachmentInfo color_attachment = {
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = n->image_views[n->image_index],
+        .imageView   = n->hdr_view,
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
@@ -590,6 +622,7 @@ bool Native_Renderer::finish_frame(bool capture)
     Native_Renderer_Frame &frame = this->frames[this->frame_index];
 
     vkCmdEndRendering(frame.command_buffer);
+    this->record_tonemap(frame.command_buffer);
 
     // A capture leaves the image laid out for its copy, after the copy's reads.
     bool captured = capture && this->record_capture(frame.command_buffer);
@@ -697,6 +730,73 @@ void Native_Renderer::end_uploads(Native_Renderer_Frame &frame)
     };
     vkCmdPipelineBarrier2(frame.upload_command_buffer, &dependency);
     vkEndCommandBuffer(frame.upload_command_buffer);
+}
+
+void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
+{
+    VkImageMemoryBarrier2 barriers[2] = {
+        {
+            // After the scene's draws.
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            .dstAccessMask       = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = this->hdr_image,
+            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        },
+        {
+            // After the acquire, which the submit waits for at this stage.
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask       = 0,
+            .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = this->images[this->image_index],
+            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        },
+    };
+    VkDependencyInfo dependency = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 2,
+        .pImageMemoryBarriers    = barriers,
+    };
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+
+    // Every pixel is drawn over, so what was there doesn't matter.
+    VkRenderingAttachmentInfo color_attachment = {
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = this->image_views[this->image_index],
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+    VkRenderingInfo rendering = {
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = { { 0, 0 }, this->swapchain_extent },
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &color_attachment,
+    };
+    vkCmdBeginRendering(command_buffer, &rendering);
+
+    // The viewport and scissor set in begin_frame() still apply.
+    Tonemap_Push_Constants push = { .exposure = this->exposure };
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->tonemap_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->tonemap_pipeline_layout,
+                            0, 1, &this->tonemap_set, 0, nullptr);
+    vkCmdPushConstants(command_buffer, this->tonemap_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+
+    vkCmdEndRendering(command_buffer);
 }
 
 bool Native_Renderer::record_capture(VkCommandBuffer command_buffer)
@@ -1204,15 +1304,16 @@ bool Native_Renderer::create_frame_descriptors()
     if (!vk_check(vkCreateDescriptorSetLayout(this->device, &layout_info, nullptr, &this->frame_set_layout),
                   "vkCreateDescriptorSetLayout")) return false;
 
-    VkDescriptorPoolSize pool_size = {
-        .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = FRAMES_IN_FLIGHT,
+    // A set per frame, and the tonemapping's.
+    VkDescriptorPoolSize pool_sizes[2] = {
+        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         .descriptorCount = FRAMES_IN_FLIGHT },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = FRAMES_IN_FLIGHT,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &pool_size,
+        .maxSets       = FRAMES_IN_FLIGHT + 1,
+        .poolSizeCount = 2,
+        .pPoolSizes    = pool_sizes,
     };
     if (!vk_check(vkCreateDescriptorPool(this->device, &pool_info, nullptr, &this->frame_pool),
                   "vkCreateDescriptorPool")) return false;
@@ -1244,7 +1345,15 @@ bool Native_Renderer::create_frame_descriptors()
         vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
     }
 
-    return true;
+    // Like a texture's, but of hdr_image: written by create_swapchain(), which makes it.
+    VkDescriptorSetAllocateInfo tonemap_set_info = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = this->frame_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &this->texture_set_layout,
+    };
+    return vk_check(vkAllocateDescriptorSets(this->device, &tonemap_set_info, &this->tonemap_set),
+                    "vkAllocateDescriptorSets");
 }
 
 void Native_Renderer::create_texture(const u8 *pixels, u32 width, u32 height, Native_Texture *texture)
@@ -1596,9 +1705,39 @@ bool Native_Renderer::create_pipelines()
         .fragment_size = sizeof(triangle_frag_spv),
         .vertex_input  = &no_vertex_input,
         .layout        = this->pipeline_layout,
+        .color_format  = HDR_FORMAT,
+        .depth_format  = this->depth_format,
         .depth_test    = false,
     };
     if (!this->create_graphics_pipeline(triangle, &this->pipeline)) return false;
+
+    VkPushConstantRange tonemap_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(Tonemap_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo tonemap_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->texture_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &tonemap_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &tonemap_layout_info, nullptr, &this->tonemap_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    Pipeline_Description tonemap = {
+        .vertex_code   = tonemap_vert_spv,
+        .vertex_size   = sizeof(tonemap_vert_spv),
+        .fragment_code = tonemap_frag_spv,
+        .fragment_size = sizeof(tonemap_frag_spv),
+        .vertex_input  = &no_vertex_input,
+        .layout        = this->tonemap_pipeline_layout,
+        .color_format  = this->surface_format.format,
+        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_test    = false,
+    };
+    if (!this->create_graphics_pipeline(tonemap, &this->tonemap_pipeline)) return false;
 
     VkPushConstantRange push_constants = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1640,6 +1779,8 @@ bool Native_Renderer::create_pipelines()
         .fragment_size = sizeof(mesh_frag_spv),
         .vertex_input  = &mesh_vertex_input,
         .layout        = this->mesh_pipeline_layout,
+        .color_format  = HDR_FORMAT,
+        .depth_format  = this->depth_format,
         .depth_test    = true,
     };
     return this->create_graphics_pipeline(mesh, &this->mesh_pipeline);
@@ -1711,12 +1852,11 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
             .dynamicStateCount = 2,
             .pDynamicStates    = dynamic_states,
         };
-        // Every pipeline renders into the same attachments as begin_frame() sets up.
         VkPipelineRenderingCreateInfo rendering = {
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .colorAttachmentCount    = 1,
-            .pColorAttachmentFormats = &this->surface_format.format,
-            .depthAttachmentFormat   = this->depth_format,
+            .pColorAttachmentFormats = &description.color_format,
+            .depthAttachmentFormat   = description.depth_format,
         };
 
         VkGraphicsPipelineCreateInfo info = {
@@ -1828,32 +1968,55 @@ bool Native_Renderer::create_swapchain(u32 width, u32 height)
         if (!vk_check(vkCreateSemaphore(this->device, &semaphore_info, nullptr, &this->render_finished[i]), "vkCreateSemaphore")) return false;
     }
 
-    if (!this->create_depth_buffer(extent)) return false;
+    if (!this->create_attachment(extent, this->depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                 VK_IMAGE_ASPECT_DEPTH_BIT, &this->depth_image, &this->depth_memory, &this->depth_view))
+        return false;
+    if (!this->create_attachment(extent, HDR_FORMAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                 VK_IMAGE_ASPECT_COLOR_BIT, &this->hdr_image, &this->hdr_memory, &this->hdr_view))
+        return false;
+
+    // The tonemapping reads texels where it draws, so the sampler doesn't matter.
+    VkDescriptorImageInfo hdr_descriptor = {
+        .sampler     = this->sampler,
+        .imageView   = this->hdr_view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet write = {
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = this->tonemap_set,
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &hdr_descriptor,
+    };
+    vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
 
     this->swapchain_extent = extent;
     this->swapchain_dirty  = false;
     return true;
 }
 
-bool Native_Renderer::create_depth_buffer(VkExtent2D extent)
+bool Native_Renderer::create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage,
+                                        VkImageAspectFlags aspect, VkImage *image, VkDeviceMemory *memory,
+                                        VkImageView *view)
 {
     VkImageCreateInfo image_info = {
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType     = VK_IMAGE_TYPE_2D,
-        .format        = this->depth_format,
+        .format        = format,
         .extent        = { extent.width, extent.height, 1 },
         .mipLevels     = 1,
         .arrayLayers   = 1,
         .samples       = VK_SAMPLE_COUNT_1_BIT,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
-        .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .usage         = usage,
         .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
-    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, &this->depth_image), "vkCreateImage")) return false;
+    if (!vk_check(vkCreateImage(this->device, &image_info, nullptr, image), "vkCreateImage")) return false;
 
     VkMemoryRequirements requirements;
-    vkGetImageMemoryRequirements(this->device, this->depth_image, &requirements);
+    vkGetImageMemoryRequirements(this->device, *image, &requirements);
 
     u32 memory_type = this->find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (memory_type == UINT32_MAX) memory_type = this->find_memory_type(requirements.memoryTypeBits, 0);
@@ -1863,17 +2026,17 @@ bool Native_Renderer::create_depth_buffer(VkExtent2D extent)
         .allocationSize  = requirements.size,
         .memoryTypeIndex = memory_type,
     };
-    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, &this->depth_memory), "vkAllocateMemory")) return false;
-    if (!vk_check(vkBindImageMemory(this->device, this->depth_image, this->depth_memory, 0), "vkBindImageMemory")) return false;
+    if (!vk_check(vkAllocateMemory(this->device, &allocate, nullptr, memory), "vkAllocateMemory")) return false;
+    if (!vk_check(vkBindImageMemory(this->device, *image, *memory, 0), "vkBindImageMemory")) return false;
 
     VkImageViewCreateInfo view_info = {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = this->depth_image,
+        .image            = *image,
         .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = this->depth_format,
-        .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+        .format           = format,
+        .subresourceRange = { aspect, 0, 1, 0, 1 },
     };
-    return vk_check(vkCreateImageView(this->device, &view_info, nullptr, &this->depth_view), "vkCreateImageView");
+    return vk_check(vkCreateImageView(this->device, &view_info, nullptr, view), "vkCreateImageView");
 }
 
 void Native_Renderer::destroy_swapchain_resources()
@@ -1888,12 +2051,17 @@ void Native_Renderer::destroy_swapchain_resources()
     }
     this->image_count = 0;
 
-    if (this->depth_view)   vkDestroyImageView(this->device, this->depth_view, nullptr);
-    if (this->depth_image)  vkDestroyImage(this->device, this->depth_image, nullptr);
-    if (this->depth_memory) vkFreeMemory(this->device, this->depth_memory, nullptr);
-    this->depth_view   = VK_NULL_HANDLE;
-    this->depth_image  = VK_NULL_HANDLE;
-    this->depth_memory = VK_NULL_HANDLE;
+    auto destroy_attachment = [this](VkImage *image, VkDeviceMemory *memory, VkImageView *view)
+    {
+        if (*view)   vkDestroyImageView(this->device, *view, nullptr);
+        if (*image)  vkDestroyImage(this->device, *image, nullptr);
+        if (*memory) vkFreeMemory(this->device, *memory, nullptr);
+        *view   = VK_NULL_HANDLE;
+        *image  = VK_NULL_HANDLE;
+        *memory = VK_NULL_HANDLE;
+    };
+    destroy_attachment(&this->depth_image, &this->depth_memory, &this->depth_view);
+    destroy_attachment(&this->hdr_image, &this->hdr_memory, &this->hdr_view);
 }
 
 #endif // RENDERER_VULKAN
