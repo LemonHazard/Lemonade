@@ -5,6 +5,7 @@
 #include "../logger.h"
 #include "surface.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <vector>
@@ -166,7 +167,21 @@ struct Mesh_Push_Constants
     Matrix4 model;                  // Model to world
     Vector4 base_color;
     Vector4 emissive_metallic;      // Emissive color, metallic
-    Vector4 roughness_normal_scale; // Roughness, normal scale, unused, unused
+    Vector4 roughness_normal_alpha; // Roughness, normal scale, alpha cutoff (0 for none), 1 when blended
+};
+
+// A draw of a blended material, kept for the end of the frame: they're drawn after
+// the solid ones, from the farthest to the nearest.
+struct Blended_Draw
+{
+    Mesh_Push_Constants push;
+    VkDescriptorSet     material_set;
+    VkDeviceSize        vertex_offset; // In mesh_buffer
+    VkDeviceSize        vertex_size;
+    VkDeviceSize        index_offset;
+    u32                 first_index;
+    u32                 index_count;
+    r32                 distance;      // From the camera to the mesh's origin
 };
 static_assert(sizeof(Mesh_Push_Constants) <= 128, "Vulkan guarantees only 128 bytes of push constants");
 
@@ -195,6 +210,7 @@ struct Pipeline_Description
     bool       depth_test;     // Also writes depth
     VkCullModeFlags cull_mode;
     bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
+    bool       blend;          // Premultiplied "over" what's there, without writing depth
 };
 
 class Native_Renderer
@@ -258,6 +274,8 @@ public:
     void end_shadow_pass(VkCommandBuffer command_buffer);
     // Draws the scene's colors into the swapchain image, fitted to the display.
     void record_tonemap(VkCommandBuffer command_buffer);
+    // Draws the frame's blended draws over its solid ones, from the farthest on.
+    void record_blended_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     bool record_capture(VkCommandBuffer command_buffer);
     VkShaderModule create_shader_module(const u32 *code, u64 size);
     // Returns UINT32_MAX when no memory type fits.
@@ -305,12 +323,15 @@ public:
     VkImageView    shadow_view    = VK_NULL_HANDLE;
     VkSampler      shadow_sampler = VK_NULL_HANDLE; // Compares depths
     bool           shadows_on     = false;          // This frame's
+    Vector3        camera_position;                 // This frame's
+    std::vector<Blended_Draw> blended_draws;        // This frame's, so far
     Matrix4        light_view_projection;           // This frame's
 
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
     VkPipelineLayout mesh_pipeline_layout = VK_NULL_HANDLE;
     VkPipeline       mesh_pipeline        = VK_NULL_HANDLE;
+    VkPipeline       mesh_blend_pipeline  = VK_NULL_HANDLE; // Same layout
     VkPipelineLayout shadow_pipeline_layout  = VK_NULL_HANDLE;
     VkPipeline       shadow_pipeline         = VK_NULL_HANDLE;
     VkPipelineLayout tonemap_pipeline_layout = VK_NULL_HANDLE;
@@ -413,6 +434,7 @@ Renderer::~Renderer()
         if (n->pipeline)             vkDestroyPipeline(n->device, n->pipeline, nullptr);
         if (n->pipeline_layout)      vkDestroyPipelineLayout(n->device, n->pipeline_layout, nullptr);
         if (n->mesh_pipeline)        vkDestroyPipeline(n->device, n->mesh_pipeline, nullptr);
+        if (n->mesh_blend_pipeline)  vkDestroyPipeline(n->device, n->mesh_blend_pipeline, nullptr);
         if (n->mesh_pipeline_layout) vkDestroyPipelineLayout(n->device, n->mesh_pipeline_layout, nullptr);
         if (n->shadow_pipeline)         vkDestroyPipeline(n->device, n->shadow_pipeline, nullptr);
         if (n->shadow_pipeline_layout)  vkDestroyPipelineLayout(n->device, n->shadow_pipeline_layout, nullptr);
@@ -551,7 +573,9 @@ bool Renderer::begin_frame(const Render_Commands &commands)
         .shadow                = { n->shadows_on ? 1.0f : 0.0f, SHADOW_NORMAL_OFFSET * shadow_texel,
                                    1.0f / (r32)SHADOW_MAP_SIZE, 0.0f },
     };
-    n->exposure = lighting.exposure;
+    n->exposure        = lighting.exposure;
+    n->camera_position = commands.camera_position;
+    n->blended_draws.clear();
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
     frame.staging_used = 0;
@@ -673,11 +697,13 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     VkDescriptorSet material_set = n->find_material(material, frame);
     if (!material_set) return;
 
+    bool blended = material.alpha_mode == Alpha_Mode::Blend;
+    r32  cutoff  = material.alpha_mode == Alpha_Mode::Mask ? material.alpha_cutoff : 0.0f;
     Mesh_Push_Constants push = {
         .model                  = transform,
         .base_color             = material.base_color,
         .emissive_metallic      = { material.emissive.x, material.emissive.y, material.emissive.z, material.metallic },
-        .roughness_normal_scale = { material.roughness, material.normal_scale, 0.0f, 0.0f },
+        .roughness_normal_alpha = { material.roughness, material.normal_scale, cutoff, blended ? 1.0f : 0.0f },
     };
 
     // With their size, so that later frames' uploads to the rest of mesh_buffer don't
@@ -685,6 +711,16 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     VkCommandBuffer command_buffer = frame.command_buffer;
     VkDeviceSize    offset         = native_mesh->vertex_offset;
     VkDeviceSize    size           = (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex);
+
+    // Blended surfaces cast no shadow.
+    if (blended)
+    {
+        Vector3 origin = { transform.at(0, 3), transform.at(1, 3), transform.at(2, 3) };
+        n->blended_draws.push_back({ push, material_set, offset, size, native_mesh->index_offset, first_index, index_count,
+                                     length(origin - n->camera_position) });
+        return;
+    }
+
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
     vkCmdBindVertexBuffers2(command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
     vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
@@ -750,6 +786,7 @@ bool Native_Renderer::finish_frame(bool capture)
 
     Native_Renderer_Frame &frame = this->frames[this->frame_index];
 
+    this->record_blended_draws(frame.command_buffer, frame);
     vkCmdEndRendering(frame.command_buffer);
     this->record_tonemap(frame.command_buffer);
     this->end_shadow_pass(frame.shadow_command_buffer);
@@ -944,6 +981,29 @@ void Native_Renderer::end_shadow_pass(VkCommandBuffer command_buffer)
         .pImageMemoryBarriers    = &to_sampled,
     };
     vkCmdPipelineBarrier2(command_buffer, &dependency);
+}
+
+void Native_Renderer::record_blended_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
+{
+    if (this->blended_draws.empty()) return;
+
+    // Sorted by their meshes' origins, which is close enough for separate panes of glass;
+    // the triangles of one draw aren't sorted.
+    std::stable_sort(this->blended_draws.begin(), this->blended_draws.end(),
+                     [](const Blended_Draw &a, const Blended_Draw &b) { return a.distance > b.distance; });
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->mesh_blend_pipeline);
+    for (const Blended_Draw &draw : this->blended_draws)
+    {
+        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &this->mesh_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
+        vkCmdBindIndexBuffer(command_buffer, this->mesh_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
+        VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, draw.material_set };
+        vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->mesh_pipeline_layout,
+                                0, 2, descriptor_sets, 0, nullptr);
+        vkCmdPushConstants(command_buffer, this->mesh_pipeline_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.push), &draw.push);
+        vkCmdDrawIndexed(command_buffer, draw.index_count, 1, draw.first_index, 0, 0);
+    }
 }
 
 void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer)
@@ -2138,6 +2198,10 @@ bool Native_Renderer::create_pipelines()
     };
     if (!this->create_graphics_pipeline(mesh, &this->mesh_pipeline)) return false;
 
+    Pipeline_Description mesh_blend = mesh;
+    mesh_blend.blend = true;
+    if (!this->create_graphics_pipeline(mesh_blend, &this->mesh_blend_pipeline)) return false;
+
     // Meshes' positions alone, from the same vertices.
     VkPushConstantRange shadow_push_constants = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
@@ -2231,12 +2295,19 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         VkPipelineDepthStencilStateCreateInfo depth_stencil = {
             .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .depthTestEnable  = description.depth_test,
-            .depthWriteEnable = description.depth_test,
+            .depthWriteEnable = description.depth_test && !description.blend,
             .depthCompareOp   = VK_COMPARE_OP_LESS,
         };
         VkPipelineColorBlendAttachmentState blend_attachment = {
-            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+            .blendEnable         = description.blend,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         };
         VkPipelineColorBlendStateCreateInfo blend = {
             .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,

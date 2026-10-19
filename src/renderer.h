@@ -25,7 +25,8 @@ public:
     // Draws index_count of the mesh's indices from first_index on, with the material
     // (see material.h; its textures mipmapped and repeated), lit by the frame's
     // lighting, shadowed by the meshes drawn in the frame (when its shadows are on),
-    // depth-tested and back-face culled. Nothing is drawn while the mesh or a texture
+    // depth-tested and back-face culled. Blended materials are drawn at the end of the
+    // frame, over the rest, from the farthest to the nearest. Nothing is drawn while the mesh or a texture
     // is still on its way to the GPU, which can take a few frames after their first draw.
     void draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Material &material);
     void end_frame();

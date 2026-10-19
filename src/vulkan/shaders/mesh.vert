@@ -6,7 +6,7 @@ layout(push_constant) uniform Push
     mat4 model; // Model to world
     vec4 base_color;
     vec4 emissive_metallic;
-    vec4 roughness_normal_scale;
+    vec4 roughness_normal_alpha;
 } push;
 
 // Matches Frame_Uniforms in renderer.cpp, like the block in mesh.frag.
