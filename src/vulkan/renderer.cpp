@@ -83,7 +83,13 @@ static_assert(MATERIAL_SLOTS >= 2 * MAX_MATERIALS, "The material hash table need
 // The scene is rendered in linear colors that can go past 1, then tonemapped into the
 // swapchain. Every device can render to and sample this format.
 constexpr VkFormat HDR_FORMAT      = VK_FORMAT_R16G16B16A16_SFLOAT;
-// The sun's shadow map is this many texels across, spread over the shadows' sphere.
+// The sun's shadows come from this many cascades, each covering a farther part of the
+// view, a layer of the shadow map this many texels across.
+constexpr u32 SHADOW_CASCADES      = 4;
+// Where the cascades split the view: blending evenly spaced splits with geometrically
+// spaced ones, which follow how much smaller things get with distance.
+constexpr r32 CASCADE_SPLIT_BLEND  = 0.75f;
+// The shadow map's layers are this many texels across.
 constexpr u32 SHADOW_MAP_SIZE      = 2048;
 // Surfaces look themselves up in the shadow map this many texels off along their
 // normal, so they don't shadow themselves.
@@ -103,13 +109,14 @@ constexpr u32 MAX_BLOOM_LEVELS     = 8;
 struct Frame_Uniforms
 {
     Matrix4 view_projection;
-    Matrix4 light_view_projection; // World to the shadow map's clip space
+    Matrix4 light_view_projections[SHADOW_CASCADES]; // World to each shadow cascade's clip space
     Vector4 camera_position;
     Vector4 sun_direction;         // Unit length
     Vector4 sun_color;
     Vector4 sky_color;
     Vector4 ground_color;
-    Vector4 shadow;                // 1 when on, the normal offset in world units, a texel in UV, unused
+    Vector4 shadow;                // 1 when on, unused, a texel in UV, unused
+    Vector4 shadow_offsets;        // How far off surfaces each cascade is looked up, in world units
     Vector4 horizon_color;
     Matrix4 inverse_view_projection;
 };
@@ -234,7 +241,7 @@ static_assert(sizeof(Mesh_Push_Constants) <= 128, "Vulkan guarantees only 128 by
 // Matches the push constant block in shaders/shadow.vert.
 struct Shadow_Push_Constants
 {
-    Matrix4 model_light_view_projection;
+    Matrix4 model;
 };
 
 // Matches the push constant block in shaders/tonemap.frag.
@@ -272,6 +279,7 @@ struct Pipeline_Description
     bool       depth_test;     // Also writes depth
     VkCullModeFlags cull_mode;
     bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
+    u32        view_mask;      // Of the views it draws, as layers of its attachments: 0 for just one
     Blend_Mode blend;          // When it's not None, depth isn't written
 };
 
@@ -299,9 +307,9 @@ public:
     bool create_pipelines();
     bool create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline);
     bool create_swapchain(u32 width, u32 height);
-    // An image to render into, with a view of it.
+    // An image to render into, with a view of it: of all its layers, when there are more.
     bool create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
-                           VkImage *image, VkDeviceMemory *memory, VkImageView *view);
+                           VkImage *image, VkDeviceMemory *memory, VkImageView *view, u32 layers = 1);
     void destroy_attachment(VkImage *image, VkDeviceMemory *memory, VkImageView *view);
     // bloom_image, its levels sized from `extent`, the frame's.
     bool create_bloom_image(VkExtent2D extent);
@@ -339,7 +347,7 @@ public:
     bool finish_frame(bool capture);
     // Clears the shadow map and gets the shadow pipeline ready for draws. Every frame
     // has the pass, so the map is always ready to be sampled, if only as all lit.
-    void begin_shadow_pass(VkCommandBuffer command_buffer);
+    void begin_shadow_pass(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     // Leaves the shadow map ready to be sampled by the frame's draws.
     void end_shadow_pass(VkCommandBuffer command_buffer);
     // Draws the scene's colors into the swapchain image, fitted to the display.
@@ -392,12 +400,12 @@ public:
     // frames like the images above, but not sized like the swapchain.
     VkImage        shadow_image   = VK_NULL_HANDLE;
     VkDeviceMemory shadow_memory  = VK_NULL_HANDLE;
-    VkImageView    shadow_view    = VK_NULL_HANDLE;
+    VkImageView    shadow_view    = VK_NULL_HANDLE; // All the layers, to render into and sample
     VkSampler      shadow_sampler = VK_NULL_HANDLE; // Compares depths
     bool           shadows_on     = false;          // This frame's
     Vector3        camera_position;                 // This frame's
     std::vector<Blended_Draw> blended_draws;        // This frame's, so far
-    Matrix4        light_view_projection;           // This frame's
+
 
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
@@ -644,42 +652,95 @@ bool Renderer::begin_frame(const Render_Commands &commands)
 
     Vector3 sun_direction = normalize(lighting.sun_direction);
 
-    // The shadow map looks along the sunlight at the shadows' sphere, from far enough
-    // to see all of it.
-    n->shadows_on            = lighting.shadow_radius > 0.0f;
-    n->light_view_projection = identity();
-    r32 shadow_texel         = 0.0f; // In world units
+    // Each shadow cascade looks along the sunlight at the sphere around a slice of the
+    // camera's view, from far enough to see all of it.
+    n->shadows_on = lighting.shadow_distance > 0.0f;
+    Matrix4 light_view_projections[SHADOW_CASCADES];
+    r32     shadow_offsets[SHADOW_CASCADES] = {};
+    for (Matrix4 &matrix : light_view_projections) matrix = identity();
     if (n->shadows_on)
     {
-        r32 radius = lighting.shadow_radius;
-        shadow_texel = 2.0f * radius / (r32)SHADOW_MAP_SIZE;
+        // The view's corners, near and far, and how far along the view they are.
+        Matrix4 clip_to_world = inverse(commands.view_projection);
+        Vector3 near_corners[4], far_corners[4];
+        for (u32 i = 0; i < 4; ++i)
+        {
+            r32 x = (i & 1) ? 1.0f : -1.0f;
+            r32 y = (i & 2) ? 1.0f : -1.0f;
+            auto unproject = [&](r32 z)
+            {
+                Vector4 p = clip_to_world * Vector4{ x, y, z, 1.0f };
+                return Vector3{ p.x / p.w, p.y / p.w, p.z / p.w };
+            };
+            near_corners[i] = unproject(0.0f);
+            far_corners[i]  = unproject(1.0f);
+        }
+        Vector3 near_center = (near_corners[0] + near_corners[1] + near_corners[2] + near_corners[3]) * 0.25f;
+        Vector3 far_center  = (far_corners[0] + far_corners[1] + far_corners[2] + far_corners[3]) * 0.25f;
+        Vector3 forward     = normalize(far_center - near_center);
+        r32     near        = dot(near_center - commands.camera_position, forward);
+        r32     far         = dot(far_center - commands.camera_position, forward);
+        r32     last        = std::min(lighting.shadow_distance, far);
+        if (near <= 0.0f) near = 0.001f;
 
-        // From the origin, so the view stays the same wherever the sphere is.
+        // From the origin, so the view stays the same wherever the cascades are.
         Vector3 up         = std::fabs(sun_direction.y) > 0.99f ? Vector3{ 0.0f, 0.0f, 1.0f } : Vector3{ 0.0f, 1.0f, 0.0f };
         Matrix4 light_view = look_at({}, sun_direction * -1.0f, up);
 
-        // On whole texels, so that the shadows' edges don't crawl when the sphere moves.
-        Vector3 center = transform_point(light_view, lighting.shadow_center);
-        center.x = std::floor(center.x / shadow_texel) * shadow_texel;
-        center.y = std::floor(center.y / shadow_texel) * shadow_texel;
+        for (u32 cascade = 0; cascade < SHADOW_CASCADES; ++cascade)
+        {
+            // The slice of the view between two splits, as its eight corners.
+            auto split = [&](u32 i)
+            {
+                r32 t = (r32)i / (r32)SHADOW_CASCADES;
+                r32 even = near + (last - near) * t;
+                r32 geometric = near * std::pow(last / near, t);
+                return geometric + (even - geometric) * (1.0f - CASCADE_SPLIT_BLEND);
+            };
+            r32 from = split(cascade), to = split(cascade + 1);
+            Vector3 corners[8];
+            for (u32 i = 0; i < 4; ++i)
+            {
+                Vector3 ray = far_corners[i] - near_corners[i];
+                corners[i]     = near_corners[i] + ray * ((from - near) / (far - near));
+                corners[i + 4] = near_corners[i] + ray * ((to - near) / (far - near));
+            }
 
-        r32 distance = -center.z; // In front of the light, which looks down -Z
-        Matrix4 projection = orthographic(center.x - radius, center.x + radius, center.y - radius, center.y + radius,
-                                          distance - radius, distance + radius);
-        n->light_view_projection = projection * light_view;
+            // Its bounding sphere stays the same size however the camera turns, so the
+            // shadow map's texels do too.
+            Vector3 center = {};
+            for (const Vector3 &corner : corners) center += corner * 0.125f;
+            r32 radius = 0.0f;
+            for (const Vector3 &corner : corners) radius = std::max(radius, length(corner - center));
+            radius = std::ceil(radius * 16.0f) / 16.0f;
+
+            // On whole texels, so that the shadows' edges don't crawl when the camera moves.
+            r32 texel = 2.0f * radius / (r32)SHADOW_MAP_SIZE;
+            Vector3 light_center = transform_point(light_view, center);
+            light_center.x = std::floor(light_center.x / texel) * texel;
+            light_center.y = std::floor(light_center.y / texel) * texel;
+
+            r32 distance = -light_center.z; // In front of the light, which looks down -Z
+            Matrix4 projection = orthographic(light_center.x - radius, light_center.x + radius,
+                                              light_center.y - radius, light_center.y + radius,
+                                              distance - radius, distance + radius);
+            light_view_projections[cascade] = projection * light_view;
+            shadow_offsets[cascade]         = SHADOW_NORMAL_OFFSET * texel;
+        }
     }
 
     auto to_vector4 = [](Vector3 v) { return Vector4{ v.x, v.y, v.z, 0.0f }; };
     *frame.uniform_mapped = {
         .view_projection       = commands.view_projection,
-        .light_view_projection = n->light_view_projection,
+        .light_view_projections = { light_view_projections[0], light_view_projections[1],
+                                    light_view_projections[2], light_view_projections[3] },
         .camera_position       = to_vector4(commands.camera_position),
         .sun_direction         = to_vector4(sun_direction),
         .sun_color             = to_vector4(lighting.sun_color),
         .sky_color             = to_vector4(lighting.sky_color),
         .ground_color          = to_vector4(lighting.ground_color),
-        .shadow                = { n->shadows_on ? 1.0f : 0.0f, SHADOW_NORMAL_OFFSET * shadow_texel,
-                                   1.0f / (r32)SHADOW_MAP_SIZE, 0.0f },
+        .shadow                = { n->shadows_on ? 1.0f : 0.0f, 0.0f, 1.0f / (r32)SHADOW_MAP_SIZE, 0.0f },
+        .shadow_offsets        = { shadow_offsets[0], shadow_offsets[1], shadow_offsets[2], shadow_offsets[3] },
         .horizon_color         = to_vector4(lighting.horizon_color),
         .inverse_view_projection = inverse(commands.view_projection),
     };
@@ -696,7 +757,7 @@ bool Renderer::begin_frame(const Render_Commands &commands)
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     vkBeginCommandBuffer(frame.shadow_command_buffer, &begin_info);
-    n->begin_shadow_pass(frame.shadow_command_buffer);
+    n->begin_shadow_pass(frame.shadow_command_buffer, frame);
     vkBeginCommandBuffer(frame.command_buffer, &begin_info);
 
     // The sky's maps, the first time and when its colors change.
@@ -861,7 +922,7 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
 
     if (n->shadows_on)
     {
-        Shadow_Push_Constants shadow_push = { n->light_view_projection * transform };
+        Shadow_Push_Constants shadow_push = { transform };
         VkCommandBuffer shadow_command_buffer = frame.shadow_command_buffer;
         vkCmdBindVertexBuffers2(shadow_command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
         vkCmdBindIndexBuffer(shadow_command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
@@ -1030,7 +1091,7 @@ void Native_Renderer::end_uploads(Native_Renderer_Frame &frame)
     vkEndCommandBuffer(frame.upload_command_buffer);
 }
 
-void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer)
+void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
 {
     const VkPipelineStageFlags2 depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
@@ -1047,7 +1108,7 @@ void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer)
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image               = this->shadow_image,
-        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, SHADOW_CASCADES },
     };
     VkDependencyInfo dependency = {
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -1064,10 +1125,12 @@ void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer)
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue  = { .depthStencil = { 1.0f, 0 } }, // Far: nothing casts a shadow
     };
+    // A view per cascade, each drawn into its layer.
     VkRenderingInfo rendering = {
         .sType            = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea       = { { 0, 0 }, { SHADOW_MAP_SIZE, SHADOW_MAP_SIZE } },
         .layerCount       = 1,
+        .viewMask         = (1u << SHADOW_CASCADES) - 1,
         .pDepthAttachment = &depth_attachment,
     };
     vkCmdBeginRendering(command_buffer, &rendering);
@@ -1084,6 +1147,8 @@ void Native_Renderer::begin_shadow_pass(VkCommandBuffer command_buffer)
     vkCmdSetViewport(command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->shadow_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->shadow_pipeline_layout,
+                            0, 1, &frame.descriptor_set, 0, nullptr);
 }
 
 void Native_Renderer::end_shadow_pass(VkCommandBuffer command_buffer)
@@ -1102,7 +1167,7 @@ void Native_Renderer::end_shadow_pass(VkCommandBuffer command_buffer)
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image               = this->shadow_image,
-        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+        .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, SHADOW_CASCADES },
     };
     VkDependencyInfo dependency = {
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -1492,12 +1557,16 @@ bool Native_Renderer::pick_physical_device()
         if (properties.apiVersion < VK_API_VERSION_1_3) continue;
 
         VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-        VkPhysicalDeviceFeatures2 features = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        VkPhysicalDeviceVulkan11Features features11 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
             .pNext = &features13,
         };
+        VkPhysicalDeviceFeatures2 features = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &features11,
+        };
         vkGetPhysicalDeviceFeatures2(candidate, &features);
-        if (!features13.dynamicRendering || !features13.synchronization2) continue;
+        if (!features13.dynamicRendering || !features13.synchronization2 || !features11.multiview) continue;
 
         u32 extension_count = 0;
         vkEnumerateDeviceExtensionProperties(candidate, nullptr, &extension_count, nullptr);
@@ -1616,16 +1685,22 @@ bool Native_Renderer::create_device()
         .synchronization2 = VK_TRUE,
         .dynamicRendering = VK_TRUE,
     };
+    // Multiview draws the shadow cascades all at once.
+    VkPhysicalDeviceVulkan11Features features11 = {
+        .sType     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext     = &features13,
+        .multiview = VK_TRUE,
+    };
 
-    // Depth clamping lets what's between the sun and the shadows' sphere cast shadows
-    // into it; nearly every desktop device has it.
+    // Depth clamping lets what's between the sun and a shadow cascade cast shadows into
+    // it; nearly every desktop device has it.
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(this->physical_device, &supported);
     this->depth_clamp = supported.depthClamp;
 
     VkPhysicalDeviceFeatures2 features = {
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext    = &features13,
+        .pNext    = &features11,
         .features = { .depthClamp = this->depth_clamp },
     };
 
@@ -1856,7 +1931,8 @@ bool Native_Renderer::create_shadow_resources()
 {
     if (!this->create_attachment({ SHADOW_MAP_SIZE, SHADOW_MAP_SIZE }, this->shadow_format,
                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                                 VK_IMAGE_ASPECT_DEPTH_BIT, &this->shadow_image, &this->shadow_memory, &this->shadow_view))
+                                 VK_IMAGE_ASPECT_DEPTH_BIT, &this->shadow_image, &this->shadow_memory, &this->shadow_view,
+                                 SHADOW_CASCADES))
         return false;
 
     // A sample is lit where its reference depth is at most the map's. Off the map it
@@ -2739,6 +2815,8 @@ bool Native_Renderer::create_pipelines()
     };
     VkPipelineLayoutCreateInfo shadow_layout_info = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->frame_set_layout, // For the cascades' matrices
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &shadow_push_constants,
     };
@@ -2763,6 +2841,7 @@ bool Native_Renderer::create_pipelines()
         .depth_test    = true,
         .cull_mode     = VK_CULL_MODE_NONE,
         .shadow_caster = true,
+        .view_mask     = (1u << SHADOW_CASCADES) - 1,
     };
     return this->create_graphics_pipeline(shadow, &this->shadow_pipeline);
 }
@@ -2857,6 +2936,7 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
             .pColorAttachmentFormats = &description.color_format,
             .depthAttachmentFormat   = description.depth_format,
         };
+        rendering.viewMask = description.view_mask;
 
         VkGraphicsPipelineCreateInfo info = {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -3061,7 +3141,7 @@ bool Native_Renderer::create_bloom_image(VkExtent2D extent)
 
 bool Native_Renderer::create_attachment(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage,
                                         VkImageAspectFlags aspect, VkImage *image, VkDeviceMemory *memory,
-                                        VkImageView *view)
+                                        VkImageView *view, u32 layers)
 {
     VkImageCreateInfo image_info = {
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -3069,7 +3149,7 @@ bool Native_Renderer::create_attachment(VkExtent2D extent, VkFormat format, VkIm
         .format        = format,
         .extent        = { extent.width, extent.height, 1 },
         .mipLevels     = 1,
-        .arrayLayers   = 1,
+        .arrayLayers   = layers,
         .samples       = VK_SAMPLE_COUNT_1_BIT,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
         .usage         = usage,
@@ -3095,9 +3175,9 @@ bool Native_Renderer::create_attachment(VkExtent2D extent, VkFormat format, VkIm
     VkImageViewCreateInfo view_info = {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image            = *image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .viewType         = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         .format           = format,
-        .subresourceRange = { aspect, 0, 1, 0, 1 },
+        .subresourceRange = { aspect, 0, 1, 0, layers },
     };
     return vk_check(vkCreateImageView(this->device, &view_info, nullptr, view), "vkCreateImageView");
 }

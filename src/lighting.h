@@ -22,11 +22,9 @@ struct Lighting
     r32     bloom;         // How much the frame's light spreads around: 0.04 makes what's far
                            // brighter than around it glow, 0 turns it off
 
-    // The sun casts shadows within this sphere, in world space, and nowhere else: a
-    // bigger one covers more of the scene with blurrier shadows. Its center can follow
-    // the camera or the player. A radius of 0 turns shadows off.
-    Vector3 shadow_center;
-    r32     shadow_radius;
+    // The sun casts shadows as far as this from the camera, fading out there: further
+    // makes each shadow map texel cover more, so shadows get blurrier. 0 turns them off.
+    r32     shadow_distance;
 };
 
 // A sun up and to the right, behind a camera looking down -Z, a dim even sky, no shadows.
@@ -40,7 +38,6 @@ inline Lighting default_lighting()
     lighting.ground_color  = { 0.02f, 0.02f, 0.02f };
     lighting.exposure      = 1.0f;
     lighting.bloom         = 0.0f;
-    lighting.shadow_center = {};
-    lighting.shadow_radius = 0.0f;
+    lighting.shadow_distance = 0.0f;
     return lighting;
 }

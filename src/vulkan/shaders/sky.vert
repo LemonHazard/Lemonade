@@ -3,16 +3,17 @@
 // Matches Frame_Uniforms in renderer.cpp, like the block in sky.frag.
 layout(set = 0, binding = 0) uniform Frame
 {
-    mat4 view_projection;
-    mat4 light_view_projection;
+    mat4 view_projection;              // World to clip space
+    mat4 light_view_projections[4];    // World to each shadow cascade's clip space
     vec4 camera_position;
-    vec4 sun_direction;
+    vec4 sun_direction;                // Towards the sun, unit length
     vec4 sun_color;
     vec4 sky_color;
     vec4 ground_color;
-    vec4 shadow;
+    vec4 shadow;                       // x: 1 when shadows are on; z: a shadow map texel, in UV
+    vec4 shadow_offsets;               // How far off surfaces each cascade is looked up, in world units
     vec4 horizon_color;
-    mat4 inverse_view_projection; // Clip space to world
+    mat4 inverse_view_projection;      // Clip space to world
 } frame;
 
 // One triangle covering the screen: the pixels outside it are clipped.

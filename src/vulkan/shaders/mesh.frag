@@ -12,21 +12,22 @@ layout(push_constant) uniform Push
 // Matches Frame_Uniforms in renderer.cpp: the frame's camera and lighting, in world space.
 layout(set = 0, binding = 0) uniform Frame
 {
-    mat4 view_projection;
-    mat4 light_view_projection; // World to the shadow map's clip space
+    mat4 view_projection;              // World to clip space
+    mat4 light_view_projections[4];    // World to each shadow cascade's clip space
     vec4 camera_position;
-    vec4 sun_direction;         // Towards the sun, unit length
+    vec4 sun_direction;                // Towards the sun, unit length
     vec4 sun_color;
     vec4 sky_color;
     vec4 ground_color;
-    vec4 shadow;                // x: 1 when shadows are on; y: normal offset, in world units; z: a texel, in UV
+    vec4 shadow;                       // x: 1 when shadows are on; z: a shadow map texel, in UV
+    vec4 shadow_offsets;               // How far off surfaces each cascade is looked up, in world units
     vec4 horizon_color;
-    mat4 inverse_view_projection;
+    mat4 inverse_view_projection;      // Clip space to world
 } frame;
 
 // Depths seen from the sun: comparing samples tell how much of them is nearer than the
 // reference, bilinearly filtered. Outside it, nothing is shadowed.
-layout(set = 0, binding = 1) uniform sampler2DShadow shadow_map;
+layout(set = 0, binding = 1) uniform sampler2DArrayShadow shadow_map; // A layer per cascade
 
 // The sky as surfaces reflect it (see environment.frag): specularly, a mip level for
 // each step of roughness from 0 to 1, and diffusely, by the direction they face.
@@ -44,23 +45,55 @@ layout(location = 1) in  vec3 in_normal;
 layout(location = 2) in  vec2 in_uv;
 layout(location = 0) out vec4 out_color;
 
-// How much of the sun reaches `position`: 0 in shadow, 1 in the open, in between over
-// the couple of texels a shadow's edge is blurred across.
+const int SHADOW_CASCADES = 4;
+
+// How much of the sun reaches `position` in a cascade: 0 in shadow, 1 in the open, in
+// between over the couple of texels a shadow's edge is blurred across. `inside` is how
+// far the point is inside the cascade, in UV, keeping clear of what the blur reads:
+// not above 0 when it's outside.
+float cascade_visibility(int cascade, vec3 position, vec3 normal, out float inside)
+{
+    // Looked up a little off the surface, so that it doesn't shadow itself.
+    vec4 light_position = frame.light_view_projections[cascade] * vec4(position + normal * frame.shadow_offsets[cascade], 1.0);
+    vec3 coordinates    = vec3(light_position.xy * 0.5 + 0.5, light_position.z); // Orthographic: w is 1
+
+    vec2 margins = min(coordinates.xy, 1.0 - coordinates.xy) - 2.0 * frame.shadow.z;
+    inside = coordinates.z > 1.0 ? 0.0 : min(margins.x, margins.y);
+    if (inside <= 0.0) return 1.0;
+
+    // Zero gradients for the first level: the branches make implicit ones undefined.
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            vec2 uv = coordinates.xy + vec2(x, y) * frame.shadow.z;
+            visibility += textureGrad(shadow_map, vec4(uv, cascade, coordinates.z), vec2(0.0), vec2(0.0));
+        }
+    }
+    return visibility / 9.0;
+}
+
+// How much of the sun reaches `position`, from the finest cascade that covers it. Near
+// a cascade's edge it blends into the next one, so their seams don't show, and the last
+// one fades into no shadow.
 float sun_visibility(vec3 position, vec3 normal)
 {
     if (frame.shadow.x == 0.0) return 1.0;
 
-    // Looked up a little off the surface, so that it doesn't shadow itself.
-    vec4 light_position = frame.light_view_projection * vec4(position + normal * frame.shadow.y, 1.0);
-    vec3 coordinates    = vec3(light_position.xy * 0.5 + 0.5, light_position.z); // Orthographic: w is 1
-    if (coordinates.z > 1.0) return 1.0; // Past the far side of the shadows' sphere
+    const float BLEND = 0.05; // Of a cascade's width
+    for (int cascade = 0; cascade < SHADOW_CASCADES; ++cascade)
+    {
+        float inside;
+        float visibility = cascade_visibility(cascade, position, normal, inside);
+        if (inside <= 0.0) continue;
+        if (inside >= BLEND) return visibility;
 
-    // Explicit level: the branches above make implicit derivatives undefined.
-    float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x)
-            visibility += textureLod(shadow_map, coordinates + vec3(vec2(x, y) * frame.shadow.z, 0.0), 0.0);
-    return visibility / 9.0;
+        float next_inside = 0.0;
+        float next = cascade + 1 < SHADOW_CASCADES ? cascade_visibility(cascade + 1, position, normal, next_inside) : 1.0;
+        return mix(next, visibility, inside / BLEND);
+    }
+    return 1.0;
 }
 
 // The surface's normal, bent by the normal texture. The texture's tangent frame comes
