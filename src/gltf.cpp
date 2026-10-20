@@ -1,10 +1,10 @@
 #include "gltf.h"
+#include "file.h"
 #include "json.h"
 #include "matrix.h"
 #include "png.h"
 #include "logger.h"
 
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -619,32 +619,20 @@ u64 load_glb(const char *path, Model *model, Texture_Library *textures, void *st
 {
     *model = {};
 
-    FILE *file = fopen(path, "rb");
-    if (!file)
+    str data = read_file(path);
+    if (data.empty())
     {
-        log_error("Could not open \"%s\"", path);
+        log_error("Could not read \"%s\"", path);
         return 0;
     }
-
-    std::vector<u8> data;
-    if (fseek(file, 0, SEEK_END) == 0)
-    {
-        long size = ftell(file);
-        if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
-        {
-            data.resize((u64)size);
-            if (fread(data.data(), 1, data.size(), file) != data.size()) data.clear();
-        }
-    }
-    fclose(file);
 
     // Images are next to the file.
     std::string directory = path;
     u64 slash = directory.find_last_of("/\\");
     directory = slash == std::string::npos ? "" : directory.substr(0, slash);
 
-    u64 used = data.empty() ? 0 : load_glb_from_memory(data.data(), data.size(), directory.c_str(), model, textures,
-                                                       storage, storage_size);
+    u64 used = load_glb_from_memory((const u8 *)data.data(), data.size(), directory.c_str(), model, textures, storage,
+                                    storage_size);
     if (used)
         log_info("Loaded \"%s\": %u vertices, %u triangles, %u materials", path, model->mesh.vertex_count,
                  model->mesh.index_count / 3, model->part_count);

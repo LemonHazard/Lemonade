@@ -1,8 +1,8 @@
 #include "png.h"
+#include "file.h"
 #include "logger.h"
 
 #include <climits>
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -54,26 +54,14 @@ u64 load_png(const char *path, Texture *texture, void *storage, u64 storage_size
 {
     *texture = {};
 
-    FILE *file = fopen(path, "rb");
-    if (!file)
+    str data = read_file(path);
+    if (data.empty())
     {
-        log_error("Could not open \"%s\"", path);
+        log_error("Could not read \"%s\"", path);
         return 0;
     }
 
-    std::vector<u8> data;
-    if (fseek(file, 0, SEEK_END) == 0)
-    {
-        long size = ftell(file);
-        if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
-        {
-            data.resize((u64)size);
-            if (fread(data.data(), 1, data.size(), file) != data.size()) data.clear();
-        }
-    }
-    fclose(file);
-
-    u64 used = data.empty() ? 0 : load_png_from_memory(data.data(), data.size(), texture, storage, storage_size);
+    u64 used = load_png_from_memory((const u8 *)data.data(), data.size(), texture, storage, storage_size);
     if (used)
         log_info("Loaded \"%s\": %ux%u", path, texture->width, texture->height);
     else
@@ -138,9 +126,7 @@ bool save_png(const char *path, const Texture &image)
         return false;
     }
 
-    FILE *file = fopen(path, "wb");
-    bool ok = file && fwrite(png.data(), 1, png.size(), file) == png.size();
-    if (file && fclose(file) != 0) ok = false;
+    bool ok = write_file(path, std::string_view((const char *)png.data(), png.size()));
 
     if (ok)
         log_info("Saved \"%s\": %ux%u", path, image.width, image.height);
