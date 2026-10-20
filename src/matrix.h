@@ -17,6 +17,13 @@ struct Matrix4
     float  at(u32 row, u32 column) const       { return (&columns[column].x)[row]; }
 };
 
+constexpr float PI = 3.14159265f;
+
+inline float radians(float degrees) { return degrees * (PI / 180.0f); }
+
+// `min` wins when it's above `max`.
+inline float clamp(float value, float min, float max) { return value < min ? min : (value > max ? max : value); }
+
 inline Vector3 operator+(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
 inline Vector3 operator-(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
 inline Vector3 operator*(Vector3 v, float s)   { return { v.x * s, v.y * s, v.z * s }; }

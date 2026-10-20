@@ -60,3 +60,17 @@ TEST_CASE("a matrix times a Vector4 keeps w", "[matrix]")
     REQUIRE(direction.x == 1.0f);
     REQUIRE(direction.w == 0.0f);
 }
+
+TEST_CASE("clamp keeps values between its limits, the lower one first", "[matrix]")
+{
+    REQUIRE(clamp(0.5f, 0.0f, 1.0f) == 0.5f);
+    REQUIRE(clamp(-2.0f, 0.0f, 1.0f) == 0.0f);
+    REQUIRE(clamp(3.0f, 0.0f, 1.0f) == 1.0f);
+    REQUIRE(clamp(0.5f, 1.0f, -1.0f) == 1.0f);
+}
+
+TEST_CASE("radians converts degrees", "[matrix]")
+{
+    REQUIRE(radians(180.0f) == Approx(PI));
+    REQUIRE(radians(-90.0f) == Approx(-PI / 2.0f));
+}
