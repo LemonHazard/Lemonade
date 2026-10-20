@@ -239,6 +239,12 @@ bool Json::parse(std::string_view text, Json *out)
 
 static const Json json_null_value;
 
+Vector3 Json::vector3_or(Vector3 fallback) const
+{
+    const Json &json = *this;
+    return { json[0].float_or(fallback.x), json[1].float_or(fallback.y), json[2].float_or(fallback.z) };
+}
+
 const Json &Json::operator[](std::string_view key) const
 {
     if (type != Json_Type::Object) return json_null_value;
@@ -277,6 +283,15 @@ Json Json::make_string(std::string_view value)
     Json json;
     json.type   = Json_Type::String;
     json.string = str(value);
+    return json;
+}
+
+Json Json::make_vector3(Vector3 value)
+{
+    Json json = make_array();
+    json.push(make_number(value.x));
+    json.push(make_number(value.y));
+    json.push(make_number(value.z));
     return json;
 }
 

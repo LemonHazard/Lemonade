@@ -361,8 +361,7 @@ static bool gltf_add_primitive(Gltf_Loader *loader, const Json &primitive, const
 
 static Vector3 gltf_read_color3(const Json &color, Vector3 fallback)
 {
-    return color.size() == 3 ? Vector3 { (float)color[0].number_or(0.0), (float)color[1].number_or(0.0), (float)color[2].number_or(0.0) }
-                             : fallback;
+    return color.size() == 3 ? color.vector3_or({}) : fallback;
 }
 
 // The image file a textureInfo's texture shows, "" for none.
@@ -406,18 +405,18 @@ static u64 gltf_material(const Json &json, u64 index, const char *directory, Tex
     const Json &color  = pbr["baseColorFactor"];
     if (color.size() == 4)
     {
-        material->base_color = { (float)color[0].number_or(1.0), (float)color[1].number_or(1.0),
-                                 (float)color[2].number_or(1.0), (float)color[3].number_or(1.0) };
+        material->base_color = { color[0].float_or(1.0f), color[1].float_or(1.0f),
+                                 color[2].float_or(1.0f), color[3].float_or(1.0f) };
     }
-    material->metallic     = (float)pbr["metallicFactor"].number_or(1.0);
-    material->roughness    = (float)pbr["roughnessFactor"].number_or(1.0);
-    material->normal_scale = (float)source["normalTexture"]["scale"].number_or(1.0);
-    r32 strength = (float)source["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].number_or(1.0);
+    material->metallic     = pbr["metallicFactor"].float_or(1.0f);
+    material->roughness    = pbr["roughnessFactor"].float_or(1.0f);
+    material->normal_scale = source["normalTexture"]["scale"].float_or(1.0f);
+    r32 strength = source["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].float_or(1.0f);
     material->emissive = gltf_read_color3(source["emissiveFactor"], {}) * strength;
 
     const str &alpha_mode  = source["alphaMode"].string;
     material->alpha_mode   = alpha_mode == "MASK" ? Alpha_Mode::Mask : alpha_mode == "BLEND" ? Alpha_Mode::Blend : Alpha_Mode::Opaque;
-    material->alpha_cutoff = (float)source["alphaCutoff"].number_or(0.5);
+    material->alpha_cutoff = source["alphaCutoff"].float_or(0.5f);
 
     u8 *at   = (u8 *)storage;
     u64 used = 0;
@@ -453,7 +452,7 @@ static Matrix4 gltf_node_transform(const Json &node)
     {
         Matrix4 m;
         for (u32 i = 0; i < 16; ++i)
-            (&m.columns[0].x)[i] = (float)matrix[i].number_or(0.0);
+            (&m.columns[0].x)[i] = matrix[i].float_or(0.0f);
         return m;
     }
 
@@ -461,9 +460,9 @@ static Matrix4 gltf_node_transform(const Json &node)
     const Json &r = node["rotation"];
     const Json &s = node["scale"];
 
-    Vector3 translate = { (float)t[0].number_or(0.0), (float)t[1].number_or(0.0), (float)t[2].number_or(0.0) };
-    Vector4 rotate    = { (float)r[0].number_or(0.0), (float)r[1].number_or(0.0), (float)r[2].number_or(0.0), (float)r[3].number_or(1.0) };
-    Vector3 scale     = { (float)s[0].number_or(1.0), (float)s[1].number_or(1.0), (float)s[2].number_or(1.0) };
+    Vector3 translate = t.vector3_or({ 0.0f, 0.0f, 0.0f });
+    Vector4 rotate    = { r[0].float_or(0.0f), r[1].float_or(0.0f), r[2].float_or(0.0f), r[3].float_or(1.0f) };
+    Vector3 scale     = s.vector3_or({ 1.0f, 1.0f, 1.0f });
 
     return translation(translate) * rotation(rotate) * scaling(scale);
 }

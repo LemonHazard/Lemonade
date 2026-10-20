@@ -117,3 +117,33 @@ TEST_CASE("Json::push and Json::set leave other types alone", "[json]")
     REQUIRE(number.items.empty());
     REQUIRE(number.members.empty());
 }
+
+TEST_CASE("Json reads floats and vector3s, falling back for what isn't there", "[json]")
+{
+    Json json;
+    REQUIRE(Json::parse(R"({ "f": 0.25, "v": [1, 2, 3], "short": [4], "mixed": [5, "x", 6] })", &json));
+
+    REQUIRE(json["f"].float_or(9.0f) == 0.25f);
+    REQUIRE(json["missing"].float_or(9.0f) == 9.0f);
+
+    Vector3 fallback = { 7.0f, 8.0f, 9.0f };
+    Vector3 v = json["v"].vector3_or(fallback);
+    REQUIRE((v.x == 1.0f && v.y == 2.0f && v.z == 3.0f));
+    Vector3 short_one = json["short"].vector3_or(fallback);
+    REQUIRE((short_one.x == 4.0f && short_one.y == 8.0f && short_one.z == 9.0f));
+    Vector3 mixed = json["mixed"].vector3_or(fallback);
+    REQUIRE((mixed.x == 5.0f && mixed.y == 8.0f && mixed.z == 6.0f));
+    Vector3 missing = json["missing"].vector3_or(fallback);
+    REQUIRE((missing.x == 7.0f && missing.y == 8.0f && missing.z == 9.0f));
+}
+
+TEST_CASE("Json::make_vector3 writes what vector3_or reads", "[json]")
+{
+    Json json = Json::make_vector3({ 0.37f, -1.0f, 2.5f });
+    REQUIRE(json.write() == "[0.37, -1, 2.5]\n");
+
+    Json read;
+    REQUIRE(Json::parse(json.write(), &read));
+    Vector3 v = read.vector3_or({});
+    REQUIRE((v.x == 0.37f && v.y == -1.0f && v.z == 2.5f));
+}

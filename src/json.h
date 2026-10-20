@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core.h"
+#include "vector.h"
 
 #include <string_view>
 #include <vector>
@@ -27,7 +28,7 @@ struct Json
     Json_Type type    = Json_Type::Null;
     bool      boolean = false;
     r64       number  = 0.0;
-    str       string;                 // Unescaped, UTF-8
+    str       string;                 // Unescaped, UTF-8; empty for anything but a string
     std::vector<Json>        items;   // Array
     std::vector<Json_Member> members; // Object, in file order
 
@@ -45,6 +46,7 @@ struct Json
     static Json make_bool(bool value);
     static Json make_number(r64 value);
     static Json make_string(std::string_view value);
+    static Json make_vector3(Vector3 value); // An array of its 3 numbers
     static Json make_array();
     static Json make_object();
     // Adds `item` to the end of an array, and returns it as added. Does nothing to
@@ -67,6 +69,10 @@ struct Json
     u64 size() const { return type == Json_Type::Array ? items.size() : 0; }
 
     r64 number_or(r64 fallback) const { return type == Json_Type::Number ? number : fallback; }
+    r32 float_or(r32 fallback) const  { return (r32)number_or(fallback); }
+    // From an array of 3 numbers, as make_vector3() writes it: any of them that's
+    // missing or not a number is fallback's.
+    Vector3 vector3_or(Vector3 fallback) const;
 };
 
 struct Json_Member
