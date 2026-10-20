@@ -41,3 +41,25 @@ struct Texture_Library
 // pixels when the file can't be loaded or the library is full (logged), and stays so
 // for the next asks.
 u64 library_texture(Texture_Library *library, const char *path, Texture *texture, void *storage, u64 storage_size);
+
+// Models loaded from .glb files, once each however many times they're asked for. Like
+// the texture library, it keeps their paths in itself, and they keep their indices.
+
+constexpr u32 MODEL_LIBRARY_SIZE = 256;
+constexpr u32 MODEL_PATH_SIZE    = 256;
+constexpr u32 NO_MODEL           = 0xFFFFFFFF;
+
+struct Model_Library
+{
+    u32   count;
+    char  paths[MODEL_LIBRARY_SIZE][MODEL_PATH_SIZE];
+    Model models[MODEL_LIBRARY_SIZE];
+};
+
+// The .glb at `path`, loaded with load_glb() into `storage`, its textures through
+// `textures`, the first time it's asked for. Returns the bytes of storage used (0 when
+// it was already loaded) and sets `index` to the model's, into the library's models.
+// When the file can't be loaded or the library is full (logged), `index` is NO_MODEL
+// and nothing is kept: it's tried again on the next ask.
+u64 library_model(Model_Library *library, const char *path, Texture_Library *textures, u32 *index, void *storage,
+                  u64 storage_size);

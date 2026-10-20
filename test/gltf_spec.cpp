@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "file.h"
 #include "gltf.h"
 #include "png.h"
 
@@ -244,6 +245,37 @@ TEST_CASE("load_glb_from_memory loads materials' textures through the library, o
     REQUIRE(material.emissive_texture.pixels == material.base_color_texture.pixels);
     REQUIRE(!material.normal_texture.pixels); // Its file is missing
     REQUIRE(library.count == 2);
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("library_model loads each .glb once, and keeps none that fail", "[gltf]")
+{
+    std::filesystem::path directory = std::filesystem::temp_directory_path() / "lemonade_model_library_spec";
+    std::filesystem::create_directories(directory);
+    std::string triangle = (directory / "triangle.glb").string();
+    std::string missing  = (directory / "missing.glb").string();
+    std::vector<u8> glb = gltf_spec_triangle_glb(R"({"mesh":0})");
+    REQUIRE(write_file(triangle.c_str(), std::string_view((const char *)glb.data(), glb.size())));
+
+    alignas(4) u8 storage[512];
+    Model_Library library = {};
+    u32 index = 7;
+
+    u64 used = library_model(&library, triangle.c_str(), nullptr, &index, storage, sizeof(storage));
+    REQUIRE(used == mesh_storage_size(3, 3));
+    REQUIRE(index == 0);
+    REQUIRE(library.models[0].mesh.vertex_count == 3);
+    REQUIRE(library.paths[0] == triangle);
+
+    REQUIRE(library_model(&library, missing.c_str(), nullptr, &index, storage + used, sizeof(storage) - used) == 0);
+    REQUIRE(index == NO_MODEL);
+    REQUIRE(library.count == 1);
+
+    index = 7;
+    REQUIRE(library_model(&library, triangle.c_str(), nullptr, &index, storage + used, sizeof(storage) - used) == 0);
+    REQUIRE(index == 0);
+    REQUIRE(library.count == 1);
 
     std::filesystem::remove_all(directory);
 }
