@@ -3,6 +3,8 @@
 #include "core.h"
 #include "vector.h"
 
+struct Json;
+
 // How a frame's meshes are lit: a sun, and the light of the sky and the ground all
 // around, which they also reflect. Colors are linear and include their intensity, so
 // they can go past 1: each is what a white, rough, non-metallic surface facing only it
@@ -41,3 +43,8 @@ inline Lighting default_lighting()
     lighting.shadow_distance = 0.0f;
     return lighting;
 }
+
+// As a JSON object with the fields by name, colors and directions as [x, y, z]. Read
+// back, a field the object doesn't have is default_lighting()'s.
+Lighting lighting_from_json(const Json &json);
+Json     lighting_to_json(const Lighting &lighting);
