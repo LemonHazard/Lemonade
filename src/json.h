@@ -34,6 +34,27 @@ struct Json
     // Returns false on malformed JSON (logged), leaving `out` null.
     static bool parse(std::string_view text, Json *out);
 
+    // As JSON text, ending with a newline. An array or object goes on one line when it
+    // fits in `width` columns, and has one item or member per line, indented 4 spaces
+    // more, when it doesn't. A number that's a float is written as the shortest that
+    // reads back as that float (0.37f as 0.37), others as the shortest for the double;
+    // infinities and NaN, which JSON doesn't have, as null.
+    str write(u32 width = 100) const;
+
+    // Building one, e.g. to write it.
+    static Json make_bool(bool value);
+    static Json make_number(r64 value);
+    static Json make_string(std::string_view value);
+    static Json make_array();
+    static Json make_object();
+    // Adds `item` to the end of an array, and returns it as added. Does nothing to
+    // anything else, returning a null value.
+    Json &push(Json item);
+    // Sets the member of an object with that key to `value`, adding it after the others
+    // when there's none, and returns it as set. Does nothing to anything else, returning
+    // a null value.
+    Json &set(std::string_view key, Json value);
+
     const Json &operator[](std::string_view key) const;
     const Json &operator[](u64 index) const;
 

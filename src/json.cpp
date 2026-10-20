@@ -2,6 +2,8 @@
 #include "logger.h"
 
 #include <charconv>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 
 // Deeper documents are rejected rather than overflowing the stack.
@@ -252,4 +254,195 @@ const Json &Json::operator[](u64 index) const
 {
     if (type != Json_Type::Array || index >= items.size()) return json_null_value;
     return items[index];
+}
+
+Json Json::make_bool(bool value)
+{
+    Json json;
+    json.type    = Json_Type::Bool;
+    json.boolean = value;
+    return json;
+}
+
+Json Json::make_number(r64 value)
+{
+    Json json;
+    json.type   = Json_Type::Number;
+    json.number = value;
+    return json;
+}
+
+Json Json::make_string(std::string_view value)
+{
+    Json json;
+    json.type   = Json_Type::String;
+    json.string = str(value);
+    return json;
+}
+
+Json Json::make_array()
+{
+    Json json;
+    json.type = Json_Type::Array;
+    return json;
+}
+
+Json Json::make_object()
+{
+    Json json;
+    json.type = Json_Type::Object;
+    return json;
+}
+
+// What push() and set() give for what they can't add to: a fresh one each time, since
+// the caller may change it.
+static Json json_discarded;
+
+Json &Json::push(Json item)
+{
+    if (type != Json_Type::Array) return json_discarded = Json();
+    items.push_back(std::move(item));
+    return items.back();
+}
+
+Json &Json::set(std::string_view key, Json value)
+{
+    if (type != Json_Type::Object) return json_discarded = Json();
+
+    for (Json_Member &member : members)
+    {
+        if (member.key == key) return member.value = std::move(value);
+    }
+    members.push_back({ str(key), std::move(value) });
+    return members.back().value;
+}
+
+static void json_write_string(std::string_view string, str *out)
+{
+    out->push_back('"');
+    for (char c : string)
+    {
+        switch (c)
+        {
+            case '"':  *out += "\\\""; break;
+            case '\\': *out += "\\\\"; break;
+            case '\b': *out += "\\b";  break;
+            case '\f': *out += "\\f";  break;
+            case '\n': *out += "\\n";  break;
+            case '\r': *out += "\\r";  break;
+            case '\t': *out += "\\t";  break;
+            default:
+                if ((u8)c < 0x20)
+                {
+                    char escape[8];
+                    snprintf(escape, sizeof(escape), "\\u%04x", (u32)(u8)c);
+                    *out += escape;
+                }
+                else
+                {
+                    out->push_back(c);
+                }
+        }
+    }
+    out->push_back('"');
+}
+
+static void json_write_number(r64 number, str *out)
+{
+    if (!std::isfinite(number))
+    {
+        *out += "null";
+        return;
+    }
+
+    char  buffer[32];
+    char *end;
+    if ((r64)(r32)number == number)
+        end = std::to_chars(buffer, buffer + sizeof(buffer), (r32)number).ptr;
+    else
+        end = std::to_chars(buffer, buffer + sizeof(buffer), number).ptr;
+    out->append(buffer, end);
+}
+
+// On one line.
+static void json_write_line(const Json &json, str *out)
+{
+    switch (json.type)
+    {
+        case Json_Type::Null:   *out += "null"; break;
+        case Json_Type::Bool:   *out += json.boolean ? "true" : "false"; break;
+        case Json_Type::Number: json_write_number(json.number, out); break;
+        case Json_Type::String: json_write_string(json.string, out); break;
+
+        case Json_Type::Array:
+            out->push_back('[');
+            for (u64 i = 0; i < json.items.size(); ++i)
+            {
+                if (i) *out += ", ";
+                json_write_line(json.items[i], out);
+            }
+            out->push_back(']');
+            break;
+
+        case Json_Type::Object:
+            if (json.members.empty())
+            {
+                *out += "{}";
+                break;
+            }
+            *out += "{ ";
+            for (u64 i = 0; i < json.members.size(); ++i)
+            {
+                if (i) *out += ", ";
+                json_write_string(json.members[i].key, out);
+                *out += ": ";
+                json_write_line(json.members[i].value, out);
+            }
+            *out += " }";
+            break;
+    }
+}
+
+// `column` is where it starts on its line, which is indented by `indent`.
+static void json_write_value(const Json &json, u32 indent, u64 column, u32 width, str *out)
+{
+    str line;
+    json_write_line(json, &line);
+
+    // With room for a comma after it.
+    bool empty = json.items.empty() && json.members.empty();
+    if (column + line.size() + 1 <= width || empty || (json.type != Json_Type::Array && json.type != Json_Type::Object))
+    {
+        *out += line;
+        return;
+    }
+
+    str inner(indent + 4, ' ');
+    bool array = json.type == Json_Type::Array;
+    out->push_back(array ? '[' : '{');
+    u64 count = array ? json.items.size() : json.members.size();
+    for (u64 i = 0; i < count; ++i)
+    {
+        *out += "\n";
+        *out += inner;
+        u64 start = out->size() - inner.size();
+        if (!array)
+        {
+            json_write_string(json.members[i].key, out);
+            *out += ": ";
+        }
+        json_write_value(array ? json.items[i] : json.members[i].value, indent + 4, out->size() - start, width, out);
+        if (i + 1 < count) out->push_back(',');
+    }
+    *out += "\n";
+    out->append(indent, ' ');
+    out->push_back(array ? ']' : '}');
+}
+
+str Json::write(u32 width) const
+{
+    str out;
+    json_write_value(*this, 0, 0, width, &out);
+    out.push_back('\n');
+    return out;
 }

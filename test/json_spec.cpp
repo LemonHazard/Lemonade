@@ -2,6 +2,8 @@
 
 #include "json.h"
 
+#include <limits>
+
 TEST_CASE("Json::parse reads nested objects and arrays", "[json]")
 {
     Json json;
@@ -46,4 +48,72 @@ TEST_CASE("Json::parse rejects malformed JSON", "[json]")
     REQUIRE_FALSE(Json::parse("1 2", &json));
     REQUIRE_FALSE(Json::parse("", &json));
     REQUIRE(json.is_null());
+}
+
+TEST_CASE("Json::write puts what fits on one line", "[json]")
+{
+    Json json = Json::make_object();
+    json.set("name", Json::make_string("barrel"));
+    Json &position = json.set("position", Json::make_array());
+    position.push(Json::make_number(0.0));
+    position.push(Json::make_number(-2.5));
+    position.push(Json::make_number(15.0));
+    json.set("empty", Json::make_object());
+    json.set("on", Json::make_bool(true));
+
+    REQUIRE(json.write() == "{ \"name\": \"barrel\", \"position\": [0, -2.5, 15], \"empty\": {}, \"on\": true }\n");
+}
+
+TEST_CASE("Json::write breaks what doesn't fit, one item or member a line", "[json]")
+{
+    Json json = Json::make_object();
+    Json &items = json.set("items", Json::make_array());
+    items.push(Json::make_string("first"));
+    items.push(Json::make_array()).push(Json::make_number(1.0));
+    json.set("last", Json());
+
+    REQUIRE(json.write(20) == "{\n"
+                              "    \"items\": [\n"
+                              "        \"first\",\n"
+                              "        [1]\n"
+                              "    ],\n"
+                              "    \"last\": null\n"
+                              "}\n");
+}
+
+TEST_CASE("Json::write writes floats and doubles as the shortest that reads back the same", "[json]")
+{
+    Json json = Json::make_array();
+    json.push(Json::make_number(0.37f)); // A float: 0.3700000047683716 as a double
+    json.push(Json::make_number(0.1));   // Not a float
+    json.push(Json::make_number(std::numeric_limits<r64>::infinity()));
+
+    REQUIRE(json.write() == "[0.37, 0.1, null]\n");
+}
+
+TEST_CASE("Json::write escapes strings, and what it writes parses back", "[json]")
+{
+    Json json = Json::make_object();
+    json.set("text", Json::make_string("a\"b\\c\n\x01\xC3\xA9"));
+    json.set("text", Json::make_string("a\"b\\c\n\x01\xC3\xA9 again")); // Replaces the member
+    REQUIRE(json.members.size() == 1);
+
+    str text = json.write();
+    REQUIRE(text == "{ \"text\": \"a\\\"b\\\\c\\n\\u0001\xC3\xA9 again\" }\n");
+
+    Json parsed;
+    REQUIRE(Json::parse(text, &parsed));
+    REQUIRE(parsed["text"].string == json["text"].string);
+}
+
+TEST_CASE("Json::push and Json::set leave other types alone", "[json]")
+{
+    Json number = Json::make_number(1.0);
+    number.push(Json::make_number(2.0)).number = 3.0;
+    number.set("key", Json::make_number(2.0));
+
+    REQUIRE(number.is_number());
+    REQUIRE(number.number == 1.0);
+    REQUIRE(number.items.empty());
+    REQUIRE(number.members.empty());
 }
