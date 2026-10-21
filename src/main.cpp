@@ -179,6 +179,7 @@ int main(int argc, char **argv)
     }
 
     log_info("Fresh Lemonade on %s!", OS_NAME);
+    log_info("%s begins", GAME_TITLE);
 
     Window window(WIDEN(GAME_TITLE), 1920, 1080);
     Renderer renderer(window);
