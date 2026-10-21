@@ -23,7 +23,7 @@ struct World
     Level        level;
 
     bool         editing;  // The editor's window is open, over the game
-    u32          selected; // The entity the editor shows
+    u32          selected; // The id of the entity the editor shows
 };
 
 // The world at the start of the game's permanent memory, with the rest of it for the

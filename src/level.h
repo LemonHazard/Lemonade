@@ -31,6 +31,7 @@ enum class Script_Field_Type : u8
 {
     R32,
     Vector3,
+    Entity, // Another entity, as a u32 of its id: NO_ID for none
 };
 
 // One of the fields of a script's data, which is a struct of them.
@@ -39,7 +40,7 @@ struct Script_Field
     const char       *name;   // What level files call it
     Script_Field_Type type;
     u32               offset; // Into the struct, from offsetof()
-    // How the editor drags it: by `step` a pixel, from `min` to `max`.
+    // How the editor drags a number: by `step` a pixel, from `min` to `max`.
     r32               step;
     r32               min;
     r32               max;
@@ -53,10 +54,15 @@ struct Script_Info
 
 constexpr u32 SCRIPT_DATA_SIZE = 32;
 
+// Entities are known to each other by their ids, which stay theirs as others are
+// added and removed, and are saved with them: their indices into the level don't.
+constexpr u32 NO_ID = 0;
+
 // Something in the level: a model where it stands, and what it does. One without a
 // model, as a camera, is only a place for its script.
 struct Entity
 {
+    u32       id       = NO_ID;    // Unique in its level, once it's in one
     u32       model    = NO_MODEL; // Into Level_Assets::models
     Vector3   position = {};
     Rotation3 rotation = {};       // Degrees, as rotation(Rotation3) turns them
@@ -125,6 +131,7 @@ struct Level
     Lighting    saved_lighting;        // As it was loaded or last saved
     Entity      entities[LEVEL_MAX_ENTITIES];
     u32         entity_count;
+    u32         last_id;               // The highest it has given: the next entity added gets the one after
 };
 
 // Loads the JSON level file at `path` over whatever was in `level`, and the models it
@@ -133,10 +140,12 @@ struct Level
 //               emission is multiplied by (1)}; a file is loaded once, however many
 //               names it has and however many levels have it
 //   "lighting": as lighting_from_json() reads it
-//   "entities": each {"model": a model's name (none for no model), "position": [x, y, z],
-//               "rotation": [pitch, yaw, roll] in degrees, "scale": [x, y, z] (1s),
-//               "script": {"name": a script's, "data": its fields by name}}
-// Anything missing is 0 or its default; what's wrong is logged and left out.
+//   "entities": each {"id": a number above 0, unique in the level, "model": a model's
+//               name (none for no model), "position": [x, y, z], "rotation": [pitch,
+//               yaw, roll] in degrees, "scale": [x, y, z] (1s), "script": {"name": a
+//               script's, "data": its fields by name, an entity by its id}}
+// Anything missing is 0 or its default, but an entity without an id (or with one
+// another has, logged) gets a new one; what's wrong is logged and left out.
 void load_level(Level *level, Level_Assets *assets, const char *path, std::span<const Script_Info> scripts);
 
 // Writes the level as load_level() reads it, with its entities and lighting as they
@@ -148,6 +157,14 @@ constexpr u32 NO_ENTITY = 0xFFFFFFFF;
 
 // The last of the level's entities with `script`, into Level::entities, or NO_ENTITY.
 u32 find_entity(const Level &level, Script script);
+
+// The level's entity with `id`, or null when it has none (NO_ID's included).
+Entity       *entity_with_id(Level *level, u32 id);
+const Entity *entity_with_id(const Level &level, u32 id);
+
+// Puts `entity` at the end of the level's entities with a new id, and returns it as
+// added: null when the level is full.
+Entity *add_entity(Level *level, const Entity &entity);
 
 // The level's first name for `model`, into Level::models, or model_count.
 u32 level_model(const Level &level, u32 model);

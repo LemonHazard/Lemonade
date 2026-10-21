@@ -22,11 +22,13 @@ namespace
     {
         r32     speed;
         Vector3 heading;
+        u32     follows; // An entity's id
     };
 
     const Script_Field MOVER_FIELDS[] = {
         { "speed", Script_Field_Type::R32, offsetof(Mover, speed), 0.1f, 0.0f, 10.0f },
         { "heading", Script_Field_Type::Vector3, offsetof(Mover, heading), 0.1f, -1.0f, 1.0f },
+        { "follows", Script_Field_Type::Entity, offsetof(Mover, follows) },
     };
 
     const Script_Info SCRIPTS[(u32)Spec_Script::count] = {
@@ -48,15 +50,15 @@ TEST_CASE("save_level writes what load_level reads", "[level]")
     level->lighting          = default_lighting();
     level->lighting.exposure = 1.5f;
 
-    Entity &mover  = level->entities[level->entity_count++];
+    Entity &mover  = *add_entity(level.get(), {});
+    Entity &marker = *add_entity(level.get(), {});
     mover.position = { 1.0f, 2.0f, 3.0f };
     mover.rotation = { 10.0f, 20.0f, 30.0f };
     mover.scale    = { 2.0f, 2.0f, 2.0f };
     mover.script   = Script(Spec_Script::mover);
     script_data<Mover>(&mover)->speed   = 4.5f;
     script_data<Mover>(&mover)->heading = { 0.0f, 0.0f, -1.0f };
-
-    Entity &marker = level->entities[level->entity_count++];
+    script_data<Mover>(&mover)->follows = marker.id;
     marker.script  = Script(Spec_Script::marker);
 
     std::string path = level_path("lemonade_level_spec.json");
@@ -71,8 +73,10 @@ TEST_CASE("save_level writes what load_level reads", "[level]")
     REQUIRE(read->lighting.exposure == 1.5f);
     REQUIRE(read->saved_lighting.exposure == 1.5f);
     REQUIRE(read->entity_count == 2);
+    REQUIRE(read->last_id == 2);
 
     const Entity &a = read->entities[0];
+    REQUIRE(a.id == mover.id);
     REQUIRE(a.model == NO_MODEL);
     REQUIRE(a.position.z == 3.0f);
     REQUIRE(a.rotation.pitch == 10.0f);
@@ -82,8 +86,10 @@ TEST_CASE("save_level writes what load_level reads", "[level]")
     REQUIRE(a.script == Script(Spec_Script::mover));
     REQUIRE(script_data<Mover>(&a)->speed == 4.5f);
     REQUIRE(script_data<Mover>(&a)->heading.z == -1.0f);
+    REQUIRE(entity_with_id(*read, script_data<Mover>(&a)->follows) == &read->entities[1]);
 
     const Entity &b = read->entities[1];
+    REQUIRE(b.id == marker.id);
     REQUIRE(b.script == Script(Spec_Script::marker));
     REQUIRE(b.scale.x == 1.0f);
 }
@@ -94,21 +100,22 @@ TEST_CASE("save_level leaves out what's 0 or its default", "[level]")
     auto assets = std::make_unique<Level_Assets>();
     level->lighting = default_lighting();
 
-    Entity &mover = level->entities[level->entity_count++];
+    Entity &mover = *add_entity(level.get(), {});
     mover.script  = Script(Spec_Script::mover);
     script_data<Mover>(&mover)->speed = 2.0f;
-    level->entities[level->entity_count++] = {};
+    add_entity(level.get(), {});
 
     std::string path = level_path("lemonade_level_spec_defaults.json");
     REQUIRE(save_level(level.get(), *assets, path.c_str(), SCRIPTS));
     str text = read_file(path.c_str());
     std::filesystem::remove(path);
 
-    REQUIRE(text.find(R"({ "position": [0, 0, 0], "script": { "name": "mover", "data": { "speed": 2 } } })") != str::npos);
-    REQUIRE(text.find(R"({ "position": [0, 0, 0] })") != str::npos);
+    REQUIRE(text.find(R"({ "id": 1, "position": [0, 0, 0], "script": { "name": "mover", "data": { "speed": 2 } } })") != str::npos);
+    REQUIRE(text.find(R"({ "id": 2, "position": [0, 0, 0] })") != str::npos);
     REQUIRE(text.find("rotation") == str::npos);
     REQUIRE(text.find("scale") == str::npos);
     REQUIRE(text.find("heading") == str::npos);
+    REQUIRE(text.find("follows") == str::npos);
 }
 
 TEST_CASE("load_level leaves out scripts and data it doesn't know, and 0s what's missing", "[level]")
@@ -166,4 +173,58 @@ TEST_CASE("find_entity finds the last entity with a script", "[level]")
     REQUIRE(find_entity(*level, Script(Spec_Script::marker)) == 3);
     REQUIRE(find_entity(*level, Script(Spec_Script::mover)) == 2);
     REQUIRE(find_entity(*level, NO_SCRIPT) == 0);
+}
+
+TEST_CASE("load_level gives new ids to entities without one or with another's", "[level]")
+{
+    std::string path = level_path("lemonade_level_spec_ids.json");
+    REQUIRE(write_file(path.c_str(), R"({ "entities": [
+        { "id": 7 },
+        { },
+        { "id": 3 },
+        { "id": 7 },
+        { "id": -2 },
+        { "id": 4, "script": { "name": "mover", "data": { "follows": 3 } } },
+        { "script": { "name": "mover", "data": { "follows": "seven" } } }
+    ] })"));
+
+    auto level  = std::make_unique<Level>();
+    auto assets = std::make_unique<Level_Assets>();
+    load_level(level.get(), assets.get(), path.c_str(), SCRIPTS);
+    std::filesystem::remove(path);
+
+    REQUIRE(level->entity_count == 7);
+    REQUIRE(level->entities[0].id == 7);
+    REQUIRE(level->entities[1].id == 8);
+    REQUIRE(level->entities[2].id == 3);
+    REQUIRE(level->entities[3].id == 9);
+    REQUIRE(level->entities[4].id == 10);
+    REQUIRE(level->entities[5].id == 4);
+    REQUIRE(level->entities[6].id == 11);
+    REQUIRE(level->last_id == 11);
+
+    REQUIRE(entity_with_id(*level, script_data<Mover>(&level->entities[5])->follows) == &level->entities[2]);
+    REQUIRE(script_data<Mover>(&level->entities[6])->follows == NO_ID);
+}
+
+TEST_CASE("add_entity gives each entity a new id, kept as others are removed", "[level]")
+{
+    auto level = std::make_unique<Level>();
+    level->last_id = 5;
+
+    Entity entity   = {};
+    entity.id       = 2;
+    entity.position = { 1.0f, 0.0f, 0.0f };
+    Entity *added   = add_entity(level.get(), entity);
+    REQUIRE(added == &level->entities[0]);
+    REQUIRE(added->id == 6);
+    REQUIRE(added->position.x == 1.0f);
+    REQUIRE(add_entity(level.get(), {})->id == 7);
+
+    REQUIRE(entity_with_id(level.get(), 7) == &level->entities[1]);
+    REQUIRE(entity_with_id(level.get(), 2) == nullptr);
+    REQUIRE(entity_with_id(level.get(), NO_ID) == nullptr);
+
+    level->entity_count = LEVEL_MAX_ENTITIES;
+    REQUIRE(add_entity(level.get(), {}) == nullptr);
 }

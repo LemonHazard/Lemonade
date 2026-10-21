@@ -18,7 +18,7 @@ void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info>
 // The level's entities: a list to pick one from, buttons that add one (a copy of the
 // picked one, or the level's first model at the origin) and remove the picked one, and
 // the picked one's fields, its script's data included. `selected` is the picked one's
-// index.
+// id.
 void edit_level_entities(Level *level, u32 *selected, std::span<const Script_Info> scripts);
 
 // The level's lighting, with a button that puts it back as it was loaded or last saved.

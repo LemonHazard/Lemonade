@@ -16,8 +16,16 @@ static u32 field_size(Script_Field_Type type)
     {
         case Script_Field_Type::R32:     return sizeof(r32);
         case Script_Field_Type::Vector3: return sizeof(Vector3);
+        case Script_Field_Type::Entity:  return sizeof(u32);
     }
     return 0;
+}
+
+// A whole number above 0 that fits a u32, or NO_ID.
+static u32 id_from_json(const Json &json)
+{
+    r64 number = json.number_or(0.0);
+    return number >= 1.0 && number <= 0xFFFFFFFF && number == (r64)(u32)number ? (u32)number : NO_ID;
 }
 
 // Reads the "data" of an entity's script into its data, by the script's fields.
@@ -54,6 +62,12 @@ static void read_script_data(Entity *entity, const Script_Info &script, const Js
                 Vector3 value = member.value.vector3_or({});
                 memcpy(at, &value, sizeof(value));
             } break;
+            case Script_Field_Type::Entity:
+            {
+                u32 id = id_from_json(member.value);
+                if (id == NO_ID) log_error("\"%s\" has \"%s\" that isn't an entity's id", path, member.key.c_str());
+                memcpy(at, &id, sizeof(id));
+            } break;
         }
     }
 }
@@ -82,6 +96,12 @@ static Json script_data_to_json(const Entity &entity, const Script_Info &script)
                 Vector3 vector;
                 memcpy(&vector, at, sizeof(vector));
                 if (vector.x || vector.y || vector.z) value = Json::make_vector3(vector);
+            } break;
+            case Script_Field_Type::Entity:
+            {
+                u32 id;
+                memcpy(&id, at, sizeof(id));
+                if (id != NO_ID) value = Json::make_number(id);
             } break;
         }
 
@@ -173,6 +193,9 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
         entity.model = model.empty() ? NO_MODEL : find_model(model);
         if (!model.empty() && entity.model == NO_MODEL) continue;
 
+        entity.id = id_from_json(item["id"]);
+        if (entity.id == NO_ID && !item["id"].is_null()) log_error("\"%s\" has an entity with an id that isn't one", path);
+
         Vector3 rotation = item["rotation"].vector3_or({});
         entity.position  = item["position"].vector3_or({});
         entity.rotation  = { rotation.x, rotation.y, rotation.z };
@@ -194,6 +217,18 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
         }
 
         level->entities[level->entity_count++] = entity;
+    }
+
+    // New ids, after the highest, for those without one and those with another's.
+    for (u32 i = 0; i < level->entity_count; ++i)
+        if (level->entities[i].id > level->last_id) level->last_id = level->entities[i].id;
+    for (u32 i = 0; i < level->entity_count; ++i)
+    {
+        Entity &entity = level->entities[i];
+        bool    taken  = false;
+        for (u32 j = 0; j < i && entity.id != NO_ID && !taken; ++j) taken = level->entities[j].id == entity.id;
+        if (taken) log_error("\"%s\" has more than one entity with the id %u", path, entity.id);
+        if (taken || entity.id == NO_ID) entity.id = ++level->last_id;
     }
 
     log_info("Loaded the level \"%s\": %u entities, %u new models (%.0f MiB), %u models in all (%.0f MiB)", path,
@@ -225,6 +260,7 @@ bool save_level(Level *level, const Level_Assets &assets, const char *path, std:
             const Rotation3 &rotation = entity.rotation;
             Json            &item     = entities.push(Json::make_object());
             u32              model    = level_model(*level, entity.model);
+            item.set("id", Json::make_number(entity.id));
             if (model < level->model_count) item.set("model", Json::make_string(level->models[model].name));
             item.set("position", Json::make_vector3(entity.position));
             if (rotation.pitch || rotation.yaw || rotation.roll)
@@ -258,6 +294,29 @@ u32 find_entity(const Level &level, Script script)
     for (u32 i = 0; i < level.entity_count; ++i)
         if (level.entities[i].script == script) found = i;
     return found;
+}
+
+const Entity *entity_with_id(const Level &level, u32 id)
+{
+    if (id == NO_ID) return nullptr;
+    for (u32 i = 0; i < level.entity_count; ++i)
+        if (level.entities[i].id == id) return &level.entities[i];
+    return nullptr;
+}
+
+Entity *entity_with_id(Level *level, u32 id)
+{
+    return const_cast<Entity *>(entity_with_id(*level, id));
+}
+
+Entity *add_entity(Level *level, const Entity &entity)
+{
+    if (level->entity_count == LEVEL_MAX_ENTITIES) return nullptr;
+
+    Entity &added = level->entities[level->entity_count++];
+    added    = entity;
+    added.id = ++level->last_id;
+    return &added;
 }
 
 u32 level_model(const Level &level, u32 model)
