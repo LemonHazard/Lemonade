@@ -1,4 +1,6 @@
-#include "level_editor.h"
+#include "editor.h"
+#include "game.h"
+#include "world.h"
 
 #include <imgui.h>
 
@@ -48,10 +50,8 @@ static void edit_script_data(Entity *entity, const Script_Info &script)
     }
 }
 
-bool edit_level_entities(Level *level, u32 *selected, std::span<const Script_Info> scripts)
+void edit_level_entities(Level *level, u32 *selected, std::span<const Script_Info> scripts)
 {
-    bool changed = false;
-
     if (ImGui::BeginListBox("##Entities", { -FLT_MIN, 8.0f * ImGui::GetTextLineHeightWithSpacing() }))
     {
         for (u32 i = 0; i < level->entity_count; ++i)
@@ -74,7 +74,6 @@ bool edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
         if (*selected < level->entity_count) entity = level->entities[*selected];
         *selected = level->entity_count;
         level->entities[level->entity_count++] = entity;
-        changed = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Remove") && *selected < level->entity_count)
@@ -82,10 +81,9 @@ bool edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
         for (u32 i = *selected + 1; i < level->entity_count; ++i) level->entities[i - 1] = level->entities[i];
         --level->entity_count;
         if (*selected == level->entity_count && *selected) --*selected;
-        changed = true;
     }
 
-    if (*selected >= level->entity_count) return changed;
+    if (*selected >= level->entity_count) return;
     Entity &entity = level->entities[*selected];
 
     u32 model = level_model(*level, entity.model);
@@ -109,14 +107,11 @@ bool edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
             {
                 entity.script = Script(i);
                 memset(entity.data, 0, sizeof(entity.data));
-                changed = true;
             }
         }
         ImGui::EndCombo();
     }
     if ((u32)entity.script < scripts.size()) edit_script_data(&entity, scripts[(u32)entity.script]);
-
-    return changed;
 }
 
 void edit_level_lighting(Level *level)
@@ -133,4 +128,37 @@ void edit_level_lighting(Level *level)
     ImGui::SliderFloat("Bloom", &lighting.bloom, 0.0f, 0.2f);
     ImGui::SliderFloat("Shadow distance", &lighting.shadow_distance, 0.0f, 150.0f, "%.0f m");
     if (ImGui::Button("Reset")) lighting = level->saved_lighting;
+}
+
+void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info> scripts)
+{
+    Input *input = frame->input;
+    ImGui::SetCurrentContext(frame->imgui);
+    input->enabled = !ImGui::GetIO().WantCaptureKeyboard;
+
+    if (input->was_pressed("Editor")) world->editing = !world->editing;
+    if (!world->editing) return;
+
+    ImGui::SetNextWindowPos({ 16.0f, 16.0f }, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({ 360.0f, 0.0f }, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Editor", &world->editing))
+    {
+        ImGui::Text("%.1f ms a frame, %u fps, %.0f s of play", frame->dt * 1000.0f, world->fps, world->play_time);
+
+        // Reload starts the level again as the file is, losing what's changed here. Save
+        // writes what's changed here to the file, with the entities where they are now.
+        Level &level = world->level;
+        ImGui::TextUnformatted(level.path);
+        ImGui::SameLine();
+        if (ImGui::Button("Reload")) load_level(&level, &world->assets, level.path, scripts);
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) save_level(&level, world->assets, level.path, scripts);
+
+        if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen))
+            edit_level_entities(&level, &world->selected, scripts);
+
+        if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+            edit_level_lighting(&level);
+    }
+    ImGui::End();
 }
