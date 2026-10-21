@@ -1,0 +1,270 @@
+#include "level.h"
+#include "file.h"
+#include "json.h"
+#include "logger.h"
+#include "render_commands.h"
+
+#include <cstdio>
+#include <cstring>
+
+// Level files are written this wide, so each entity fits on a line.
+constexpr u32 LEVEL_FILE_WIDTH = 160;
+
+static u32 field_size(Script_Field_Type type)
+{
+    switch (type)
+    {
+        case Script_Field_Type::R32:     return sizeof(r32);
+        case Script_Field_Type::Vector3: return sizeof(Vector3);
+    }
+    return 0;
+}
+
+// Reads the "data" of an entity's script into its data, by the script's fields.
+static void read_script_data(Entity *entity, const Script_Info &script, const Json &json, const char *path)
+{
+    for (const Json_Member &member : json.members)
+    {
+        const Script_Field *field = nullptr;
+        for (const Script_Field &f : script.fields)
+            if (member.key == f.name) field = &f;
+
+        if (!field)
+        {
+            log_error("\"%s\" has data \"%s\" the script \"%s\" doesn't have", path, member.key.c_str(), script.name);
+            continue;
+        }
+        if (field->offset + field_size(field->type) > SCRIPT_DATA_SIZE)
+        {
+            log_error("The script \"%s\" has its field \"%s\" past its data's %u bytes", script.name, field->name,
+                      SCRIPT_DATA_SIZE);
+            continue;
+        }
+
+        u8 *at = entity->data + field->offset;
+        switch (field->type)
+        {
+            case Script_Field_Type::R32:
+            {
+                r32 value = member.value.float_or(0.0f);
+                memcpy(at, &value, sizeof(value));
+            } break;
+            case Script_Field_Type::Vector3:
+            {
+                Vector3 value = member.value.vector3_or({});
+                memcpy(at, &value, sizeof(value));
+            } break;
+        }
+    }
+}
+
+// The script's fields in the entity's data that aren't 0, as read_script_data() reads
+// them: null when they're all 0.
+static Json script_data_to_json(const Entity &entity, const Script_Info &script)
+{
+    Json json;
+    for (const Script_Field &field : script.fields)
+    {
+        if (field.offset + field_size(field.type) > SCRIPT_DATA_SIZE) continue;
+
+        const u8 *at = entity.data + field.offset;
+        Json      value;
+        switch (field.type)
+        {
+            case Script_Field_Type::R32:
+            {
+                r32 number;
+                memcpy(&number, at, sizeof(number));
+                if (number) value = Json::make_number(number);
+            } break;
+            case Script_Field_Type::Vector3:
+            {
+                Vector3 vector;
+                memcpy(&vector, at, sizeof(vector));
+                if (vector.x || vector.y || vector.z) value = Json::make_vector3(vector);
+            } break;
+        }
+
+        if (value.is_null()) continue;
+        if (json.is_null()) json = Json::make_object();
+        json.set(field.name, value);
+    }
+    return json;
+}
+
+void load_level(Level *level, Level_Assets *assets, const char *path, std::span<const Script_Info> scripts)
+{
+    // `path` may be the level's own, to load it again.
+    char file[LEVEL_PATH_SIZE];
+    snprintf(file, sizeof(file), "%s", path);
+    *level = {};
+    snprintf(level->path, sizeof(level->path), "%s", file);
+    path = level->path;
+
+    Json json;
+    str  text = read_file(path);
+    if (text.empty())
+        log_error("Could not read the level \"%s\"", path);
+    else if (!Json::parse(text, &json))
+        log_error("Could not parse the level \"%s\"", path);
+
+    u64 used_before = assets->storage_used;
+    u32 new_models  = 0;
+
+    for (const Json_Member &member : json["models"].members)
+    {
+        if (level->model_count == LEVEL_MAX_MODELS)
+        {
+            log_error("\"%s\" has more than %u models", path, LEVEL_MAX_MODELS);
+            break;
+        }
+        if (member.key.size() >= LEVEL_NAME_SIZE)
+        {
+            log_error("\"%s\" has a model with a name longer than %u: \"%s\"", path, LEVEL_NAME_SIZE - 1, member.key.c_str());
+            continue;
+        }
+
+        u32 index;
+        u64 used = library_model(&assets->models, member.value["file"].string.c_str(), &assets->textures, &index,
+                                 assets->storage + assets->storage_used, assets->storage_size - assets->storage_used);
+        if (index == NO_MODEL) continue; // Logged: it's tried again on the next load
+
+        Model &model = assets->models.models[index];
+        if (used)
+        {
+            assets->storage_used += used;
+            for (u32 i = 0; i < model.part_count; ++i) assets->model_emissive[index][i] = model.parts[i].material.emissive;
+            ++new_models;
+        }
+
+        // Unity's emission of 1 is as bright as a lit wall: flames are far brighter, enough
+        // to glow through the bloom in daylight.
+        r32 emissive_scale = member.value["emissive_scale"].float_or(1.0f);
+        for (u32 i = 0; i < model.part_count; ++i) model.parts[i].material.emissive = assets->model_emissive[index][i] * emissive_scale;
+
+        Level_Model &level_model = level->models[level->model_count++];
+        snprintf(level_model.name, sizeof(level_model.name), "%s", member.key.c_str());
+        level_model.model          = index;
+        level_model.emissive_scale = emissive_scale;
+    }
+
+    // NO_MODEL when the level has none of that name (logged).
+    auto find_model = [&](std::string_view name) -> u32
+    {
+        for (u32 i = 0; i < level->model_count; ++i)
+            if (level->models[i].name == name) return level->models[i].model;
+        log_error("\"%s\" has no model \"%.*s\"", path, (int)name.size(), name.data());
+        return NO_MODEL;
+    };
+
+    level->saved_lighting = lighting_from_json(json["lighting"]);
+    level->lighting       = level->saved_lighting;
+
+    for (const Json &item : json["entities"].items)
+    {
+        if (level->entity_count == LEVEL_MAX_ENTITIES)
+        {
+            log_error("\"%s\" has more than %u entities", path, LEVEL_MAX_ENTITIES);
+            break;
+        }
+
+        Entity           entity = {};
+        std::string_view model  = item["model"].string;
+        entity.model = model.empty() ? NO_MODEL : find_model(model);
+        if (!model.empty() && entity.model == NO_MODEL) continue;
+
+        Vector3 rotation = item["rotation"].vector3_or({});
+        entity.position  = item["position"].vector3_or({});
+        entity.rotation  = { rotation.x, rotation.y, rotation.z };
+        entity.scale     = item["scale"].vector3_or(entity.scale);
+
+        const Json      &script = item["script"];
+        std::string_view name   = script["name"].string;
+        if (!name.empty())
+        {
+            u32 kind = 0;
+            while (kind < scripts.size() && name != scripts[kind].name) ++kind;
+            if (kind < scripts.size())
+            {
+                entity.script = Script(kind);
+                read_script_data(&entity, scripts[kind], script["data"], path);
+            }
+            else
+                log_error("\"%s\" has no script \"%.*s\"", path, (int)name.size(), name.data());
+        }
+
+        level->entities[level->entity_count++] = entity;
+    }
+
+    log_info("Loaded the level \"%s\": %u entities, %u new models (%.0f MiB), %u models in all (%.0f MiB)", path,
+             level->entity_count, new_models, (r64)(assets->storage_used - used_before) / MiB, assets->models.count,
+             (r64)assets->storage_used / MiB);
+}
+
+bool save_level(Level *level, const Level_Assets &assets, const char *path, std::span<const Script_Info> scripts)
+{
+    level->saved_lighting = level->lighting;
+
+    Json json = Json::make_object();
+    {
+        Json &models = json.set("models", Json::make_object());
+        for (u32 i = 0; i < level->model_count; ++i)
+        {
+            const Level_Model &model = level->models[i];
+            Json &entry = models.set(model.name, Json::make_object());
+            entry.set("file", Json::make_string(assets.models.paths[model.model]));
+            if (model.emissive_scale != 1.0f) entry.set("emissive_scale", Json::make_number(model.emissive_scale));
+        }
+    }
+    json.set("lighting", lighting_to_json(level->lighting));
+    {
+        Json &entities = json.set("entities", Json::make_array());
+        for (u32 i = 0; i < level->entity_count; ++i)
+        {
+            const Entity    &entity   = level->entities[i];
+            const Rotation3 &rotation = entity.rotation;
+            Json            &item     = entities.push(Json::make_object());
+            u32              model    = level_model(*level, entity.model);
+            if (model < level->model_count) item.set("model", Json::make_string(level->models[model].name));
+            item.set("position", Json::make_vector3(entity.position));
+            if (rotation.pitch || rotation.yaw || rotation.roll)
+                item.set("rotation", Json::make_vector3({ rotation.pitch, rotation.yaw, rotation.roll }));
+            if (entity.scale.x != 1.0f || entity.scale.y != 1.0f || entity.scale.z != 1.0f)
+                item.set("scale", Json::make_vector3(entity.scale));
+
+            u32 kind = (u32)entity.script;
+            if (entity.script != NO_SCRIPT && kind < scripts.size())
+            {
+                Json &script = item.set("script", Json::make_object());
+                script.set("name", Json::make_string(scripts[kind].name));
+                Json data = script_data_to_json(entity, scripts[kind]);
+                if (!data.is_null()) script.set("data", data);
+            }
+        }
+    }
+
+    bool saved = write_file(path, json.write(LEVEL_FILE_WIDTH));
+
+    if (saved)
+        log_info("Saved the level \"%s\": %u entities", path, level->entity_count);
+    else
+        log_error("Could not save the level \"%s\"", path);
+    return saved;
+}
+
+u32 level_model(const Level &level, u32 model)
+{
+    u32 i = 0;
+    while (i < level.model_count && level.models[i].model != model) ++i;
+    return i;
+}
+
+void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets)
+{
+    commands->lighting = level.lighting;
+    for (u32 i = 0; i < level.entity_count; ++i)
+    {
+        const Entity &entity = level.entities[i];
+        if (entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity));
+    }
+}
