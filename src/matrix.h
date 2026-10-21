@@ -124,6 +124,21 @@ inline Matrix4 rotation(Vector4 q)
     return m;
 }
 
+// Turned `roll` degrees about +Z, then `pitch` about +X, then `yaw` about +Y, each
+// counter-clockwise looking down its axis at the origin: what faces -Z leans by the
+// roll, looks up by the pitch, and heads by the yaw (90 faces -X).
+inline Matrix4 rotation(Rotation3 degrees)
+{
+    auto about = [](Vector3 axis, float angle)
+    {
+        float half = radians(angle) * 0.5f;
+        float s    = std::sin(half);
+        return rotation(Vector4{ axis.x * s, axis.y * s, axis.z * s, std::cos(half) });
+    };
+    return about({ 0.0f, 1.0f, 0.0f }, degrees.yaw) * about({ 1.0f, 0.0f, 0.0f }, degrees.pitch) *
+           about({ 0.0f, 0.0f, 1.0f }, degrees.roll);
+}
+
 // Of the upper 3x3: negative when `m` mirrors, which turns triangles inside out.
 inline float determinant3x3(const Matrix4 &m)
 {

@@ -74,3 +74,22 @@ TEST_CASE("radians converts degrees", "[matrix]")
     REQUIRE(radians(180.0f) == Approx(PI));
     REQUIRE(radians(-90.0f) == Approx(-PI / 2.0f));
 }
+
+TEST_CASE("a rotation from degrees rolls, then pitches, then yaws", "[matrix]")
+{
+    Vector3 heading = transform_vector(rotation(Rotation3{ 0.0f, 90.0f, 0.0f }), { 0.0f, 0.0f, -1.0f });
+    REQUIRE(heading.x == Approx(-1.0f));
+    REQUIRE(heading.z == Approx(0.0f).margin(1e-6));
+
+    Vector3 up = transform_vector(rotation(Rotation3{ 90.0f, 0.0f, 0.0f }), { 0.0f, 0.0f, -1.0f });
+    REQUIRE(up.y == Approx(1.0f));
+
+    Vector3 leaning = transform_vector(rotation(Rotation3{ 0.0f, 0.0f, 90.0f }), { 1.0f, 0.0f, 0.0f });
+    REQUIRE(leaning.y == Approx(1.0f));
+
+    // Looking up 45 degrees, headed to -X: the pitch is about the turned X.
+    Vector3 both = transform_vector(rotation(Rotation3{ 45.0f, 90.0f, 0.0f }), { 0.0f, 0.0f, -1.0f });
+    REQUIRE(both.x == Approx(-std::sqrt(0.5f)));
+    REQUIRE(both.y == Approx(std::sqrt(0.5f)));
+    REQUIRE(both.z == Approx(0.0f).margin(1e-6));
+}
