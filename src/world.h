@@ -13,7 +13,7 @@ struct Game_Memory;
 // storage follows it.
 struct World
 {
-    bool         initialized;   // Set by the game once it has loaded its first level
+    bool         initialized;   // The first level is loaded (see run_world())
     r64          play_time;     // Seconds
     u32          fps;           // Frames in the last whole second of play
     u32          second_frames; // Frames so far in this second
