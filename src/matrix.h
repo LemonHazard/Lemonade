@@ -28,6 +28,7 @@ inline Vector3 operator+(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, 
 inline Vector3 operator-(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
 inline Vector3 operator*(Vector3 v, float s)   { return { v.x * s, v.y * s, v.z * s }; }
 inline Vector3 &operator+=(Vector3 &a, Vector3 b) { a = a + b; return a; }
+inline Vector3 &operator-=(Vector3 &a, Vector3 b) { a = a - b; return a; }
 
 inline float dot(Vector3 a, Vector3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline float length(Vector3 v)         { return std::sqrt(dot(v, v)); }
