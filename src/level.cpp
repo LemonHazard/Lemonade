@@ -252,6 +252,14 @@ bool save_level(Level *level, const Level_Assets &assets, const char *path, std:
     return saved;
 }
 
+u32 find_entity(const Level &level, Script script)
+{
+    u32 found = NO_ENTITY;
+    for (u32 i = 0; i < level.entity_count; ++i)
+        if (level.entities[i].script == script) found = i;
+    return found;
+}
+
 u32 level_model(const Level &level, u32 model)
 {
     u32 i = 0;

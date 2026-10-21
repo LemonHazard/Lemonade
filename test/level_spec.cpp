@@ -152,3 +152,18 @@ TEST_CASE("load_level can load the level again from its own path", "[level]")
     REQUIRE(level->entity_count == 1);
     REQUIRE(level->entities[0].position.x == 1.0f);
 }
+
+TEST_CASE("find_entity finds the last entity with a script", "[level]")
+{
+    auto level = std::make_unique<Level>();
+    REQUIRE(find_entity(*level, Script(Spec_Script::marker)) == NO_ENTITY);
+
+    level->entity_count = 4;
+    level->entities[1].script = Script(Spec_Script::marker);
+    level->entities[2].script = Script(Spec_Script::mover);
+    level->entities[3].script = Script(Spec_Script::marker);
+
+    REQUIRE(find_entity(*level, Script(Spec_Script::marker)) == 3);
+    REQUIRE(find_entity(*level, Script(Spec_Script::mover)) == 2);
+    REQUIRE(find_entity(*level, NO_SCRIPT) == 0);
+}

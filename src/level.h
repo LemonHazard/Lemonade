@@ -144,6 +144,11 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
 // (logged).
 bool save_level(Level *level, const Level_Assets &assets, const char *path, std::span<const Script_Info> scripts);
 
+constexpr u32 NO_ENTITY = 0xFFFFFFFF;
+
+// The last of the level's entities with `script`, into Level::entities, or NO_ENTITY.
+u32 find_entity(const Level &level, Script script);
+
 // The level's first name for `model`, into Level::models, or model_count.
 u32 level_model(const Level &level, u32 model);
 
