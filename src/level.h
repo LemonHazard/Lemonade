@@ -9,7 +9,10 @@
 #include <span>
 #include <type_traits>
 
+struct Entity;
+struct Game_Frame;
 struct Render_Commands;
+struct World;
 
 // A level: the models it names, its lighting, and the entities placed in it, loaded
 // from a JSON file and saved back to one. It's plain data, so the game can keep it in
@@ -18,8 +21,8 @@ struct Render_Commands;
 // What entities do is the game's: each has a script, a kind of behavior the game
 // defines and runs every frame, and the data that script keeps for it. The engine
 // knows scripts only through the table of them the game passes in, to read, write and
-// edit their data by name. The table is in the game's code, which moves on reload, so
-// it's passed to each call and never kept.
+// edit their data by name, and to run their code. The table is in the game's code,
+// which moves on reload, so it's passed to each call and never kept.
 
 // The game's, defined as
 //   enum class Script : u32 { none, ..., count };
@@ -46,10 +49,17 @@ struct Script_Field
     r32               max;
 };
 
+// What a script does for an entity of its kind, in the world (see world.h).
+typedef void Script_Update(World *world, Entity *entity, const Game_Frame *frame);
+
 struct Script_Info
 {
     const char                   *name; // What level files call it
     std::span<const Script_Field> fields;
+    // Each frame, in the level's order, then after every entity's update for what goes
+    // after others, as a camera following what it looks at. Either can be null.
+    Script_Update                *update;
+    Script_Update                *late_update;
 };
 
 constexpr u32 SCRIPT_DATA_SIZE = 32;
