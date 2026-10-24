@@ -17,6 +17,7 @@ struct Game_Definition
 
 // One frame of the world, in the game's memory: loads the first level when the game
 // starts, opens the editor on the "Editor" key (see editor.h) and quits on "Quit",
-// runs the entities' scripts' updates, then their late updates, and draws the level
-// with the sky behind it.
+// runs the entities' scripts' updates, then their late updates, lets the editor pick
+// entities in the level as the camera they set sees it, and draws the level with the sky
+// behind it.
 void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &game);

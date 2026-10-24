@@ -40,6 +40,8 @@ void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &ga
         if (script && script->late_update) script->late_update(world, &level.entities[i], frame);
     }
 
+    edit_in_view(world, frame);
+
     frame->render->sky_background = true;
     push_level(frame->render, level, world->assets);
 }

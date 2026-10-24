@@ -92,13 +92,21 @@ void edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
 {
     if (ImGui::BeginListBox("##Entities", { -FLT_MIN, 8.0f * ImGui::GetTextLineHeightWithSpacing() }))
     {
+        // The list remembers the one it last showed picked, to see one picked elsewhere (in
+        // the level's view, or added) and scroll to it when it's out of sight.
+        ImGuiStorage *storage = ImGui::GetStateStorage();
+        ImGuiID       shown   = ImGui::GetID("Shown");
+        bool          moved   = (u32)storage->GetInt(shown, (int)NO_ID) != *selected;
+
         for (u32 i = 0; i < level->entity_count; ++i)
         {
             const Entity &entity = level->entities[i];
             char          label[LEVEL_NAME_SIZE + 16];
             entity_label(*level, entity, scripts, label, sizeof(label));
             if (ImGui::Selectable(label, *selected == entity.id)) *selected = entity.id;
+            else if (moved && *selected == entity.id && !ImGui::IsItemVisible()) ImGui::SetScrollHereY();
         }
+        storage->SetInt(shown, (int)*selected);
         ImGui::EndListBox();
     }
 
@@ -200,4 +208,33 @@ void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info>
             edit_level_lighting(&level);
     }
     ImGui::End();
+}
+
+void edit_in_view(World *world, Game_Frame *frame)
+{
+    if (!world->editing) return;
+    ImGui::SetCurrentContext(frame->imgui);
+    ImGuiIO &io = ImGui::GetIO();
+
+    Level         &level         = world->level;
+    const Matrix4 &world_to_clip = frame->render->view_projection;
+
+    // The ray under the pointer, from the near plane to the far one.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse && ImGui::IsMousePosValid() &&
+        io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f)
+    {
+        r32     x             = 2.0f * io.MousePos.x / io.DisplaySize.x - 1.0f;
+        r32     y             = 2.0f * io.MousePos.y / io.DisplaySize.y - 1.0f;
+        Matrix4 clip_to_world = inverse(world_to_clip);
+        Vector4 near_point    = clip_to_world * Vector4{ x, y, 0.0f, 1.0f };
+        Vector4 far_point     = clip_to_world * Vector4{ x, y, 1.0f, 1.0f };
+        Vector3 from          = near_point.xyz * (1.0f / near_point.w);
+        Vector3 to            = far_point.xyz * (1.0f / far_point.w);
+        world->selected       = entity_on_ray(level, world->assets, from, to - from);
+    }
+
+    const Entity *picked = entity_with_id(level, world->selected);
+    if (picked && picked->model != NO_MODEL)
+        push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
+                       { 1.0f, 0.75f, 0.15f, 1.0f });
 }
