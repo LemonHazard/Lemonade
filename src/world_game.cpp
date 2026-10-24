@@ -23,10 +23,23 @@ void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &ga
         log_info("Game code loaded after %.1f s of play", world->play_time);
 
     begin_world_frame(world, frame);
-    update_editor(world, frame, game.scripts);
+    update_editor(world, frame, game);
 
     if (frame->input->was_pressed("Quit"))
         frame->quit = true;
+
+    // The game's level waits while the palette's is shown. They share models, each with
+    // its own emission for them.
+    if (palette_shown(*world))
+    {
+        Level &palette = world->palette.level;
+        view_palette(world, frame);
+        scale_level_emission(palette, &world->assets);
+        frame->render->sky_background = true;
+        push_level(frame->render, palette, world->assets);
+        return;
+    }
+    scale_level_emission(level, &world->assets);
 
     // Scripts may add or remove entities as they run: each pass takes them as they are.
     for (u32 i = 0; i < level.entity_count; ++i)

@@ -2,6 +2,7 @@
 
 #include "core.h"
 #include "level.h"
+#include "palette.h"
 
 struct Game_Frame;
 struct Game_Memory;
@@ -24,6 +25,9 @@ struct World
 
     bool         editing;  // The editor's window is open, over the game
     u32          selected; // The id of the entity the editor shows
+    Palette      palette;  // The editor's models to place, and what it shows of them
+    bool         placing;  // A click on the level places a `placed` there (see edit_in_view())
+    u32          placed;   // The model, into Level_Assets::models
 };
 
 // The world at the start of the game's permanent memory, with the rest of it for the

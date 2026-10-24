@@ -1,6 +1,9 @@
 #include "editor.h"
+#include "file.h"
 #include "game.h"
+#include "logger.h"
 #include "world.h"
+#include "world_game.h"
 
 #include <imgui.h>
 
@@ -179,7 +182,109 @@ void edit_level_lighting(Level *level)
     if (ImGui::Button("Reset")) lighting = level->saved_lighting;
 }
 
-void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info> scripts)
+// The palette's folders, as the disk had them when they were last read: again after
+// the game's code is reloaded.
+static std::vector<Palette_Folder> palette_folders;
+static bool                        palette_read;
+
+static void open_palette(World *world, const Game_Definition &game)
+{
+    Palette &palette = world->palette;
+    palette.open = true;
+    if (!palette.group[0]) show_palette_models(&palette, &world->assets, {}, game.palette_ground, world->level.lighting);
+}
+
+// Back to the editor, placing the model picked in the palette, if one is.
+static void close_palette(World *world)
+{
+    Palette      &palette = world->palette;
+    const Entity *picked  = entity_with_id(palette.level, palette.selected);
+    palette.open = false;
+    if (picked && picked->model != NO_MODEL)
+    {
+        world->placing = true;
+        world->placed  = picked->model;
+    }
+}
+
+// Its window: what's picked, how much is loaded, and the folders' groups to show.
+static void edit_palette(World *world, const Game_Definition &game)
+{
+    Palette            &palette = world->palette;
+    const Level_Assets &assets  = world->assets;
+    if (!palette_read)
+    {
+        palette_folders = read_palette(game.model_folder);
+        palette_read    = true;
+    }
+
+    ImGui::SetNextWindowPos({ 16.0f, 16.0f }, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({ 360.0f, 480.0f }, ImGuiCond_FirstUseEver);
+    bool open = true;
+    if (ImGui::Begin("Palette", &open))
+    {
+        const Entity *picked = entity_with_id(palette.level, palette.selected);
+        u32           named  = picked ? level_model(palette.level, picked->model) : palette.level.model_count;
+        if (ImGui::Button("Back to editor")) open = false;
+        ImGui::SameLine();
+        if (named < palette.level.model_count)
+            ImGui::Text("Places %s", palette.level.models[named].name);
+        else
+            ImGui::TextDisabled("Click a model to place it");
+
+        // Nothing loaded is let go of: what's looked through stays until the game ends.
+        ImGui::TextDisabled("%u of %u models loaded, %.0f of %.0f MiB", assets.models.count, MODEL_LIBRARY_SIZE,
+                            (r64)assets.storage_used / MiB, (r64)assets.storage_size / MiB);
+        ImGui::TextDisabled("Right-drag turns, the wheel zooms, WASD moves");
+
+        const ImGuiStyle &style = ImGui::GetStyle();
+        for (const Palette_Folder &folder : palette_folders)
+        {
+            if (!ImGui::CollapsingHeader(folder.name.c_str())) continue;
+            ImGui::PushID(folder.name.c_str());
+
+            // The buttons fill a line, then the next.
+            r32 right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+            for (u64 i = 0; i < folder.groups.size(); ++i)
+            {
+                const Palette_Group &group = folder.groups[i];
+                char                 shown[LEVEL_PATH_SIZE];
+                snprintf(shown, sizeof(shown), "%s: %s", folder.name.c_str(), group.name.c_str());
+
+                r32 width = ImGui::CalcTextSize(group.name.c_str()).x + 2.0f * style.FramePadding.x;
+                if (i && ImGui::GetItemRectMax().x + style.ItemSpacing.x + width <= right) ImGui::SameLine();
+
+                bool current = strcmp(shown, palette.group) == 0;
+                if (current) ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
+                if (ImGui::Button(group.name.c_str()))
+                {
+                    show_palette_models(&palette, &world->assets, group.files, game.palette_ground,
+                                        world->level.lighting);
+                    snprintf(palette.group, sizeof(palette.group), "%s", shown);
+                }
+                if (current) ImGui::PopStyleColor();
+
+                if (ImGui::IsItemHovered() && !group.files.empty())
+                {
+                    std::string_view first = file_stem(group.files.front());
+                    std::string_view last  = file_stem(group.files.back());
+                    ImGui::SetTooltip("%u models, %.*s to %.*s", (u32)group.files.size(), (int)first.size(),
+                                      first.data(), (int)last.size(), last.data());
+                }
+            }
+            ImGui::PopID();
+        }
+
+        // For models added or removed while the game runs.
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Read the folders again")) palette_read = false;
+    }
+    ImGui::End();
+
+    if (!open) close_palette(world);
+}
+
+void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
 {
     Input *input = frame->input;
     ImGui::SetCurrentContext(frame->imgui);
@@ -187,6 +292,13 @@ void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info>
 
     if (input->was_pressed("Editor")) world->editing = !world->editing;
     if (!world->editing) return;
+    if (world->palette.open)
+    {
+        edit_palette(world, game);
+        return;
+    }
+
+    std::span<const Script_Info> scripts = game.scripts;
 
     ImGui::SetNextWindowPos({ 16.0f, 16.0f }, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize({ 360.0f, 0.0f }, ImGuiCond_FirstUseEver);
@@ -202,6 +314,21 @@ void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info>
         if (ImGui::Button("Reload")) load_level(&level, &world->assets, level.path, scripts);
         ImGui::SameLine();
         if (ImGui::Button("Save")) save_level(&level, world->assets, level.path, scripts);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!game.model_folder);
+        if (ImGui::Button("Palette")) open_palette(world, game);
+        ImGui::EndDisabled();
+
+        if (world->placing)
+        {
+            std::string_view name = file_stem(world->assets.models.paths[world->placed]);
+            ImGui::Text("Placing %.*s", (int)name.size(), name.data());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Stop")) world->placing = false;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+            ImGui::TextWrapped("Click the level to place it there, with Shift to go on placing; right-click to stop");
+            ImGui::PopStyleColor();
+        }
 
         if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen))
             edit_level_entities(&level, &world->selected, scripts);
@@ -253,30 +380,155 @@ static Vector4 picked_color(r64 time)
     return { color.x, color.y, color.z, 1.0f };
 }
 
+// The ray under the pointer, from the near plane to the far one, as `world_to_clip`
+// sees it: false when the pointer is on ImGui's windows or off the level.
+static bool ray_under_mouse(const Matrix4 &world_to_clip, Vector3 *from, Vector3 *along)
+{
+    ImGuiIO &io = ImGui::GetIO();
+    if (io.WantCaptureMouse || !ImGui::IsMousePosValid() || io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+        return false;
+
+    r32     x             = 2.0f * io.MousePos.x / io.DisplaySize.x - 1.0f;
+    r32     y             = 2.0f * io.MousePos.y / io.DisplaySize.y - 1.0f;
+    Matrix4 clip_to_world = inverse(world_to_clip);
+    Vector4 near_point    = clip_to_world * Vector4{ x, y, 0.0f, 1.0f };
+    Vector4 far_point     = clip_to_world * Vector4{ x, y, 1.0f, 1.0f };
+    *from                 = near_point.xyz * (1.0f / near_point.w);
+    *along                = far_point.xyz * (1.0f / far_point.w) - *from;
+    return true;
+}
+
+// Where the ray first meets the level's models, or the ground's plane (y = 0) when it
+// misses them: false when it meets neither.
+static bool point_on_level(const World &world, Vector3 from, Vector3 along, Vector3 *at)
+{
+    r32 t;
+    entity_on_ray(world.level, world.assets, from, along, &t);
+    if (t == INFINITY && along.y != 0.0f && -from.y / along.y >= 0.0f) t = -from.y / along.y;
+    if (t == INFINITY) return false;
+
+    *at = from + along * t;
+    return true;
+}
+
+// The model from the palette, where the pointer is on the level, and put there on a click.
+static void place_in_view(World *world, Game_Frame *frame, Vector3 from, Vector3 along)
+{
+    Level  &level = world->level;
+    Entity  placed = {};
+    Vector3 at;
+    if (!point_on_level(*world, from, along, &at)) return;
+
+    // Its bottom on the point, wherever its origin is.
+    placed.model    = world->placed;
+    placed.position = at - Vector3{ 0.0f, world->assets.model_bounds[placed.model].min.y, 0.0f };
+
+    const Model &model = world->assets.models.models[placed.model];
+    push_model(frame->render, model, entity_transform(placed));
+    push_wireframe(frame->render, model.mesh, entity_transform(placed), picked_color(world->play_time));
+
+    if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+
+    Entity *added = nullptr;
+    if (add_level_model(&level, world->assets, placed.model) < level.model_count) added = add_entity(&level, placed);
+    if (added)
+        world->selected = added->id;
+    else
+        log_error("Can't place another model in \"%s\": it has %u models and %u entities at most", level.path,
+                  LEVEL_MAX_MODELS, LEVEL_MAX_ENTITIES);
+    if (!ImGui::GetIO().KeyShift) world->placing = false;
+}
+
 void edit_in_view(World *world, Game_Frame *frame)
 {
     if (!world->editing) return;
     ImGui::SetCurrentContext(frame->imgui);
-    ImGuiIO &io = ImGui::GetIO();
 
-    Level         &level         = world->level;
-    const Matrix4 &world_to_clip = frame->render->view_projection;
+    Level  &level = world->level;
+    Vector3 from, along;
+    bool    on_level = ray_under_mouse(frame->render->view_projection, &from, &along);
 
-    // The ray under the pointer, from the near plane to the far one.
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse && ImGui::IsMousePosValid() &&
-        io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f)
+    if (world->placing)
     {
-        r32     x             = 2.0f * io.MousePos.x / io.DisplaySize.x - 1.0f;
-        r32     y             = 2.0f * io.MousePos.y / io.DisplaySize.y - 1.0f;
-        Matrix4 clip_to_world = inverse(world_to_clip);
-        Vector4 near_point    = clip_to_world * Vector4{ x, y, 0.0f, 1.0f };
-        Vector4 far_point     = clip_to_world * Vector4{ x, y, 1.0f, 1.0f };
-        Vector3 from          = near_point.xyz * (1.0f / near_point.w);
-        Vector3 to            = far_point.xyz * (1.0f / far_point.w);
-        world->selected       = entity_on_ray(level, world->assets, from, to - from);
+        if (on_level) place_in_view(world, frame, from, along);
+        if (on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) world->placing = false;
     }
+    else if (on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        world->selected = entity_on_ray(level, world->assets, from, along);
 
     const Entity *picked = entity_with_id(level, world->selected);
+    if (picked && picked->model != NO_MODEL)
+        push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
+                       picked_color(world->play_time));
+}
+
+bool palette_shown(const World &world)
+{
+    return world.editing && world.palette.open;
+}
+
+// The palette's camera turns this many degrees for each pixel the pointer is dragged,
+// comes this much closer for each notch of the wheel, and moves this many times as far
+// as it is from what it looks at each second.
+constexpr r32 PALETTE_TURN_SPEED = 0.3f;
+constexpr r32 PALETTE_ZOOM_STEP  = 0.85f;
+constexpr r32 PALETTE_MOVE_SPEED = 0.75f;
+
+void view_palette(World *world, Game_Frame *frame)
+{
+    ImGui::SetCurrentContext(frame->imgui);
+    ImGuiIO &io      = ImGui::GetIO();
+    Palette &palette = world->palette;
+    palette.level.lighting = world->level.lighting;
+
+    if (!io.WantCaptureMouse)
+    {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+        {
+            palette.yaw   = std::remainder(palette.yaw - io.MouseDelta.x * PALETTE_TURN_SPEED, 360.0f);
+            palette.pitch = clamp(palette.pitch + io.MouseDelta.y * PALETTE_TURN_SPEED, -30.0f, 89.0f);
+        }
+        palette.distance = clamp(palette.distance * std::pow(PALETTE_ZOOM_STEP, io.MouseWheel), 0.25f, 2000.0f);
+    }
+
+    r32     yaw     = radians(palette.yaw);
+    r32     pitch   = radians(palette.pitch);
+    Vector3 forward = { -std::sin(yaw), 0.0f, -std::cos(yaw) };
+    Vector3 right   = { std::cos(yaw), 0.0f, -std::sin(yaw) };
+    if (!io.WantCaptureKeyboard)
+    {
+        Vector3 move = {};
+        if (ImGui::IsKeyDown(ImGuiKey_W)) move += forward;
+        if (ImGui::IsKeyDown(ImGuiKey_S)) move -= forward;
+        if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
+        if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
+        palette.focus += normalize(move) * (palette.distance * PALETTE_MOVE_SPEED * frame->dt);
+    }
+
+    // Its near and far planes go with how far it is, so what's small is seen up close
+    // and what's big from far away.
+    Vector3 behind = { std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch) };
+    Vector3 eye    = palette.focus + behind * palette.distance;
+    r32     aspect = frame->height ? (r32)frame->width / (r32)frame->height : 1.0f;
+    r32     z_near = std::max(0.01f * palette.distance, 0.02f);
+    r32     z_far  = std::max(8.0f * palette.distance, 150.0f);
+    frame->render->view_projection = perspective(radians(PALETTE_FIELD_OF_VIEW), aspect, z_near, z_far) *
+                                     look_at(eye, palette.focus, { 0.0f, 1.0f, 0.0f });
+    frame->render->camera_position = eye;
+
+    Vector3 from, along;
+    if (ray_under_mouse(frame->render->view_projection, &from, &along))
+    {
+        u32           id      = entity_on_ray(palette.level, world->assets, from, along);
+        const Entity *pointed = id == palette.ground ? nullptr : entity_with_id(palette.level, id);
+        u32           named   = pointed ? level_model(palette.level, pointed->model) : palette.level.model_count;
+        if (named < palette.level.model_count) ImGui::SetTooltip("%s", palette.level.models[named].name);
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) palette.selected = pointed ? pointed->id : NO_ID;
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && pointed) close_palette(world);
+    }
+
+    const Entity *picked = entity_with_id(palette.level, palette.selected);
     if (picked && picked->model != NO_MODEL)
         push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
                        picked_color(world->play_time));
