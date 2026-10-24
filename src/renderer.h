@@ -45,6 +45,11 @@ public:
     // The texture's pixels changed: they're copied again before it's next drawn. Also
     // between frames, when begin_frame() returned false.
     void update_texture(const Texture &texture);
+    // The game's memory from `begin` to `end` is used for other things from now on: the
+    // meshes and textures drawn from it are forgotten, their GPU copies freed, so what's
+    // put there next is copied anew. Waits for the GPU to finish the frames it's drawing
+    // when it has any to forget. Between frames only, before begin_frame().
+    void forget_memory(const void *begin, const void *end);
     void end_frame();
     // Ends the frame like end_frame(), then waits for the GPU to finish it and reads
     // back what it drew, for screenshots: 8-bit RGBA, sRGB-encoded as displayed, rows

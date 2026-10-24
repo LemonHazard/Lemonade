@@ -67,8 +67,9 @@ static const u32 wire_frag_spv[] =
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
-// Meshes stay on the GPU once drawn, in one buffer of this size: past it, or past
-// this many meshes, new ones aren't drawn.
+// Meshes stay on the GPU once drawn, until the game's memory they came from is
+// forgotten, in one buffer of this size: past it, or past this many meshes, new ones
+// aren't drawn.
 constexpr u64 MESH_BUFFER_SIZE     = 512 * MiB;
 constexpr u32 MAX_MESHES           = 4096;
 constexpr u32 MESH_SLOT_BITS       = 13; // The hash table has twice MAX_MESHES slots
@@ -204,8 +205,16 @@ struct Native_Mesh
     const u32         *indices       = nullptr;
     u32                vertex_count  = 0;
     u32                index_count   = 0;
-    u64                vertex_offset = 0; // In mesh_buffer
+    u64                vertex_offset = 0; // In mesh_buffer, where its range of it starts
     u64                index_offset  = 0;
+    u64                size          = 0; // Of its range of mesh_buffer
+};
+
+// A range of mesh_buffer.
+struct Mesh_Range
+{
+    u64 offset;
+    u64 size;
 };
 
 // A texture on the GPU, recognized by the game's pixels and the format they're read
@@ -399,6 +408,9 @@ public:
     // The GPU copy of a mesh, recorded into the frame's uploads the first time it's
     // drawn. Returns nullptr when the mesh can't be drawn this frame (logged).
     const Native_Mesh *find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame);
+    // A range of mesh_buffer of `size` bytes, the first one that fits: false when none does.
+    bool allocate_mesh_range(u64 size, u64 *offset);
+    void free_mesh_range(Mesh_Range range);
     // Begins the frame's upload_command_buffer, unless it already has.
     void begin_uploads(Native_Renderer_Frame &frame);
     // Ends the frame's upload_command_buffer, after a barrier making its mesh copies
@@ -541,12 +553,12 @@ public:
     Native_Material       materials[MATERIAL_SLOTS];            // Open addressing on the textures' addresses
     u32                   material_count      = 0;
 
-    // Device-local vertices and indices of every mesh drawn so far, never freed.
-    VkBuffer       mesh_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory mesh_memory = VK_NULL_HANDLE;
-    u64            mesh_used   = 0;
-    Native_Mesh    meshes[MESH_SLOTS]; // Open addressing on the vertices' address
-    u32            mesh_count  = 0;
+    // Device-local vertices and indices of every mesh drawn so far, until it's forgotten.
+    VkBuffer                mesh_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory          mesh_memory = VK_NULL_HANDLE;
+    std::vector<Mesh_Range> mesh_free;         // What no mesh has of it, by offset, none touching another
+    Native_Mesh             meshes[MESH_SLOTS]; // Open addressing on the vertices' address
+    u32                     mesh_count  = 0;
 
     // Frames read back for screenshots: copied to a host-visible buffer, then
     // converted to RGBA in capture_pixels. Made for the first capture.
@@ -1118,6 +1130,78 @@ void Renderer::update_texture(const Texture &texture)
             candidate.replaced      = true;
         }
     }
+}
+
+void Renderer::forget_memory(const void *begin, const void *end)
+{
+    Native_Renderer *n = this->native;
+    if (!n->ready) return;
+
+    auto from = [&](const void *data) { return data >= begin && data < end; };
+
+    u32 meshes   = 0;
+    u32 textures = 0;
+    for (const Native_Mesh &mesh : n->meshes) meshes += mesh.vertices && (from(mesh.vertices) || from(mesh.indices));
+    for (const Native_Texture &texture : n->textures) textures += texture.pixels && from(texture.pixels);
+    if (!meshes && !textures) return;
+
+    // The frames being drawn may still use them.
+    vk_check(vkDeviceWaitIdle(n->device), "vkDeviceWaitIdle");
+
+    // Each table is filled again with what's kept: taking some out would break the
+    // probes past them.
+    std::vector<Native_Mesh> kept_meshes;
+    for (Native_Mesh &mesh : n->meshes)
+    {
+        if (!mesh.vertices) continue;
+        if (from(mesh.vertices) || from(mesh.indices))
+            n->free_mesh_range({ mesh.vertex_offset, mesh.size });
+        else
+            kept_meshes.push_back(mesh);
+        mesh = {};
+    }
+    for (const Native_Mesh &mesh : kept_meshes)
+    {
+        u32 slot = hash_address(mesh.vertices, MESH_SLOT_BITS);
+        while (n->meshes[slot].vertices) slot = (slot + 1) & (MESH_SLOTS - 1);
+        n->meshes[slot] = mesh;
+    }
+    n->mesh_count         = (u32)kept_meshes.size();
+    n->meshes_full_logged = false;
+
+    if (textures)
+    {
+        std::vector<Native_Texture> kept_textures;
+        for (Native_Texture &texture : n->textures)
+        {
+            if (!texture.pixels) continue;
+            if (from(texture.pixels))
+            {
+                if (texture.ui_set) vkFreeDescriptorSets(n->device, n->ui_pool, 1, &texture.ui_set);
+                n->destroy_texture(&texture);
+            }
+            else
+                kept_textures.push_back(texture);
+            texture = {};
+        }
+        for (const Native_Texture &texture : kept_textures)
+        {
+            u32 slot = hash_address(texture.pixels, TEXTURE_SLOT_BITS);
+            while (n->textures[slot].pixels) slot = (slot + 1) & (TEXTURE_SLOTS - 1);
+            n->textures[slot] = texture;
+        }
+        n->texture_count        = (u32)kept_textures.size();
+        n->textures_full_logged = false;
+
+        // Materials know their textures by where they were in the table: they're all made
+        // again as they're drawn.
+        vk_check(vkResetDescriptorPool(n->device, n->material_pool, 0), "vkResetDescriptorPool");
+        for (Native_Material &material : n->materials) material = {};
+        n->material_count        = 0;
+        n->materials_full_logged = false;
+    }
+
+    log_info("Forgot %u meshes and %u textures", meshes, textures);
 }
 
 void Renderer::end_frame()
@@ -2091,6 +2175,7 @@ bool Native_Renderer::create_frames()
                       "vkMapMemory")) return false;
     }
 
+    this->mesh_free = { { 0, MESH_BUFFER_SIZE } };
     return this->create_buffer(MESH_BUFFER_SIZE,
                                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &this->mesh_buffer, &this->mesh_memory);
@@ -2233,6 +2318,7 @@ bool Native_Renderer::create_texture_resources()
     };
     VkDescriptorPoolCreateInfo ui_pool_info = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, // Forgotten textures' sets are freed
         .maxSets       = MAX_TEXTURES + 1,
         .poolSizeCount = 1,
         .pPoolSizes    = &ui_pool_size,
@@ -2914,7 +3000,9 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
         }
         return nullptr;
     }
-    if (this->mesh_count == MAX_MESHES || size > MESH_BUFFER_SIZE - this->mesh_used)
+    u64 offset = 0;
+    if (size > STAGING_BUFFER_SIZE - frame.staging_used) return nullptr; // Staging is full: the mesh waits for the next frame
+    if (this->mesh_count == MAX_MESHES || !this->allocate_mesh_range(size, &offset))
     {
         if (!this->meshes_full_logged)
         {
@@ -2924,9 +3012,6 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
         }
         return nullptr;
     }
-    // Staging is full for this frame: the mesh waits for the next one.
-    if (size > STAGING_BUFFER_SIZE - frame.staging_used) return nullptr;
-
     u8 *staged = frame.staging_mapped + frame.staging_used;
     memcpy(staged,                 mesh.vertices, vertices_size);
     memcpy(staged + indices_start, mesh.indices,  indices_size);
@@ -2935,7 +3020,7 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
 
     VkBufferCopy copy = {
         .srcOffset = frame.staging_used,
-        .dstOffset = this->mesh_used,
+        .dstOffset = offset,
         .size      = size,
     };
     vkCmdCopyBuffer(frame.upload_command_buffer, frame.staging_buffer, this->mesh_buffer, 1, &copy);
@@ -2945,13 +3030,51 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
     created->indices       = mesh.indices;
     created->vertex_count  = mesh.vertex_count;
     created->index_count   = mesh.index_count;
-    created->vertex_offset = this->mesh_used;
-    created->index_offset  = this->mesh_used + indices_start;
+    created->vertex_offset = offset;
+    created->index_offset  = offset + indices_start;
+    created->size          = size;
 
     frame.staging_used += size;
-    this->mesh_used    += size;
     this->mesh_count   += 1;
     return created;
+}
+
+bool Native_Renderer::allocate_mesh_range(u64 size, u64 *offset)
+{
+    for (u64 i = 0; i < this->mesh_free.size(); ++i)
+    {
+        Mesh_Range &range = this->mesh_free[i];
+        if (range.size < size) continue;
+
+        *offset       = range.offset;
+        range.offset += size;
+        range.size   -= size;
+        if (!range.size) this->mesh_free.erase(this->mesh_free.begin() + (i64)i);
+        return true;
+    }
+    return false;
+}
+
+void Native_Renderer::free_mesh_range(Mesh_Range range)
+{
+    // Joined to the free ranges right before and after it.
+    auto after = std::lower_bound(this->mesh_free.begin(), this->mesh_free.end(), range.offset,
+                                  [](const Mesh_Range &free, u64 offset) { return free.offset < offset; });
+    if (after != this->mesh_free.end() && range.offset + range.size == after->offset)
+    {
+        range.size += after->size;
+        after       = this->mesh_free.erase(after);
+    }
+    if (after != this->mesh_free.begin())
+    {
+        Mesh_Range &before = *(after - 1);
+        if (before.offset + before.size == range.offset)
+        {
+            before.size += range.size;
+            return;
+        }
+    }
+    this->mesh_free.insert(after, range);
 }
 
 VkShaderModule Native_Renderer::create_shader_module(const u32 *code, u64 size)

@@ -22,6 +22,7 @@ enum class Render_Command_Type : u32
     Draw_Ui,
     Update_Texture,
     Draw_Wireframe,
+    Forget_Memory,
 };
 
 // Every command starts with this header; `size` covers the header and the command's
@@ -82,6 +83,18 @@ struct Render_Command_Update_Texture
 {
     Render_Command_Header header;
     Texture  texture;
+};
+
+// The game's memory from `begin` to `end` is used for other things from this frame on,
+// as models loaded there are let go of: the meshes and textures drawn from it are
+// forgotten before the frame is drawn, wherever the command is in it, so the frame's
+// draws may already have new data there. Their GPU copies are freed, once the frames
+// still drawn with them are done.
+struct Render_Command_Forget_Memory
+{
+    Render_Command_Header header;
+    const void *begin;
+    const void *end;
 };
 
 struct Render_Commands
@@ -186,6 +199,16 @@ inline void push_texture_update(Render_Commands *commands, const Texture &textur
     if (!command) return;
 
     command->texture = texture;
+}
+
+inline void push_forget_memory(Render_Commands *commands, const void *begin, const void *end)
+{
+    auto *command = (Render_Command_Forget_Memory *)
+        push_render_command(commands, Render_Command_Type::Forget_Memory, sizeof(Render_Command_Forget_Memory));
+    if (!command) return;
+
+    command->begin = begin;
+    command->end   = end;
 }
 
 // Every part of the model, each with its material.

@@ -6,8 +6,9 @@
 // pixels, sRGB-encoded, rows from the top. Like meshes, the pixels stay where the game
 // keeps them (its memory, usually). The renderer starts copying a texture to the GPU the
 // first time it's drawn and keeps it there for the next frames, recognizing it by its
-// pixels' address: pixels changed in place aren't picked up. Big textures take a few
-// frames to copy, and meshes drawn with them show up once they're done.
+// pixels' address: pixels changed in place aren't picked up (see push_texture_update()),
+// and memory used for other textures is forgotten first (see push_forget_memory()). Big
+// textures take a few frames to copy, and meshes drawn with them show up once they're done.
 
 struct Texture
 {

@@ -46,6 +46,10 @@ void Renderer::update_texture(const Texture &)
 {
 }
 
+void Renderer::forget_memory(const void *, const void *)
+{
+}
+
 void Renderer::end_frame()
 {
 }

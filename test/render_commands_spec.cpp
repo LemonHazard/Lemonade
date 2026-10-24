@@ -112,3 +112,20 @@ TEST_CASE("push_wireframe records the triangles to draw, all of them by default"
     REQUIRE(second->index_count == 3);
     REQUIRE(commands.used == all->header.size + second->header.size);
 }
+
+TEST_CASE("push_forget_memory records the memory to forget", "[render_commands]")
+{
+    alignas(std::max_align_t) u8 buffer[128];
+    Render_Commands commands = {};
+    commands.buffer   = buffer;
+    commands.capacity = sizeof(buffer);
+
+    u8 memory[64];
+    push_forget_memory(&commands, memory + 16, memory + 48);
+
+    auto *command = (Render_Command_Forget_Memory *)buffer;
+    REQUIRE(command->header.type == Render_Command_Type::Forget_Memory);
+    REQUIRE(command->begin == memory + 16);
+    REQUIRE(command->end == memory + 48);
+    REQUIRE(commands.used == command->header.size);
+}

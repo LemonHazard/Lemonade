@@ -154,6 +154,27 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
                                         command->color);
                 break;
             }
+
+            case Render_Command_Type::Forget_Memory:
+                break; // Before the frame (see forget_memory())
+        }
+
+        if (header->size == 0)
+            break;
+        at += header->size;
+    }
+}
+
+// What the frame's commands forget, before it's drawn, or when it isn't.
+static void forget_memory(Renderer &renderer, const Render_Commands &commands)
+{
+    for (u64 at = 0; at < commands.used;)
+    {
+        auto *header = (const Render_Command_Header *)(commands.buffer + at);
+        if (header->type == Render_Command_Type::Forget_Memory)
+        {
+            auto *command = (const Render_Command_Forget_Memory *)header;
+            renderer.forget_memory(command->begin, command->end);
         }
 
         if (header->size == 0)
@@ -273,6 +294,7 @@ int main(int argc, char **argv)
         // The engine's own action, bound in key_bindings.kvl like the game's.
         bool screenshot_pressed = input.was_pressed("Screenshot");
 
+        forget_memory(renderer, render_commands);
         if (renderer.begin_frame(render_commands))
         {
             draw(renderer, render_commands);
