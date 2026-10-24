@@ -4,7 +4,9 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -210,6 +212,47 @@ void update_editor(World *world, Game_Frame *frame, std::span<const Script_Info>
     ImGui::End();
 }
 
+// The picked one's wireframe breathes, from violet to white, back to violet, to black
+// and back again, so it stands out on light and dark alike: it's mostly white for
+// PICKED_SHADE_SECONDS, mostly violet for PICKED_VIOLET_SECONDS, mostly black, and
+// mostly violet again.
+constexpr r64 PICKED_SHADE_SECONDS  = 0.5;
+constexpr r64 PICKED_VIOLET_SECONDS = 1.0;
+
+// Its color `time` seconds into the play, sRGB-encoded.
+static Vector4 picked_color(r64 time)
+{
+    const Vector3 violet = { 0.6f, 0.2f, 1.0f };
+    const Vector3 white  = { 1.0f, 1.0f, 1.0f };
+    const Vector3 black  = { 0.0f, 0.0f, 0.0f };
+
+    // A sine wave, white at its top and black at its bottom, whose quarters around them
+    // (where it's past 0.7 either way) go by in PICKED_SHADE_SECONDS, and whose quarters
+    // around violet in PICKED_VIOLET_SECONDS. It starts at its white quarter.
+    const r64 seconds[4] = {
+        PICKED_SHADE_SECONDS,
+        PICKED_VIOLET_SECONDS,
+        PICKED_SHADE_SECONDS,
+        PICKED_VIOLET_SECONDS
+    };
+
+    r64 at = std::fmod(time, 2.0 * (PICKED_SHADE_SECONDS + PICKED_VIOLET_SECONDS));
+
+    u32 quarter = 0;
+    while (quarter < 3 && at >= seconds[quarter])
+    {
+        at -= seconds[quarter++];
+    }
+
+    r64 angle = 0.5 * PI * (quarter + 0.5 + std::min(at / seconds[quarter], 1.0));
+    r32 wave  = (r32)std::sin(angle);
+
+    Vector3 to    = wave > 0.0f ? white : black;
+    Vector3 color = violet + (to - violet) * std::fabs(wave);
+
+    return { color.x, color.y, color.z, 1.0f };
+}
+
 void edit_in_view(World *world, Game_Frame *frame)
 {
     if (!world->editing) return;
@@ -236,5 +279,5 @@ void edit_in_view(World *world, Game_Frame *frame)
     const Entity *picked = entity_with_id(level, world->selected);
     if (picked && picked->model != NO_MODEL)
         push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
-                       { 1.0f, 0.75f, 0.15f, 1.0f });
+                       picked_color(world->play_time));
 }
