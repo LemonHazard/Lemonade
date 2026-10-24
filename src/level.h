@@ -179,5 +179,10 @@ Entity *add_entity(Level *level, const Entity &entity);
 // The level's first name for `model`, into Level::models, or model_count.
 u32 level_model(const Level &level, u32 model);
 
+// The id of the nearest of the level's entities whose model is in the way of the ray
+// from `origin` along `direction`, through either side of its triangles: NO_ID when
+// none is. Those without a model are never in the way.
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction);
+
 // What the level looks like: its entities' models, and its lighting.
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets);

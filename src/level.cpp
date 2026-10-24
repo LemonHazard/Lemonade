@@ -4,6 +4,7 @@
 #include "logger.h"
 #include "render_commands.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -324,6 +325,62 @@ u32 level_model(const Level &level, u32 model)
     u32 i = 0;
     while (i < level.model_count && level.models[i].model != model) ++i;
     return i;
+}
+
+// How far along the ray, in `direction`s, it first goes through one of the mesh's
+// triangles, either side, if that's nearer than `nearest`: `nearest` when it isn't.
+static r32 ray_on_mesh(const Mesh &mesh, Vector3 origin, Vector3 direction, r32 nearest)
+{
+    // Möller and Trumbore's: where the ray crosses the triangle's plane, in the
+    // triangle's own coordinates u and v.
+    for (u32 i = 0; i + 2 < mesh.index_count; i += 3)
+    {
+        Vector3 a = mesh.vertices[mesh.indices[i]].position;
+        Vector3 b = mesh.vertices[mesh.indices[i + 1]].position;
+        Vector3 c = mesh.vertices[mesh.indices[i + 2]].position;
+
+        Vector3 ab          = b - a;
+        Vector3 ac          = c - a;
+        Vector3 p           = cross(direction, ac);
+        r32     determinant = dot(ab, p);
+        if (determinant == 0.0f) continue; // Along its plane
+
+        r32     inverse = 1.0f / determinant;
+        Vector3 to      = origin - a;
+        r32     u       = dot(to, p) * inverse;
+        if (u < 0.0f || u > 1.0f) continue;
+
+        Vector3 q = cross(to, ab);
+        r32     v = dot(direction, q) * inverse;
+        if (v < 0.0f || u + v > 1.0f) continue;
+
+        r32 t = dot(ac, q) * inverse;
+        if (t >= 0.0f && t < nearest) nearest = t;
+    }
+    return nearest;
+}
+
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction)
+{
+    // Each model is met in its own space: how far along the ray is the same there.
+    u32 found   = NO_ID;
+    r32 nearest = INFINITY;
+    for (u32 i = 0; i < level.entity_count; ++i)
+    {
+        const Entity &entity = level.entities[i];
+        Matrix4 transform = entity_transform(entity);
+        if (entity.model == NO_MODEL || determinant3x3(transform) == 0.0f) continue; // Not there, or flattened
+
+        Matrix4 to_model = inverse(transform);
+        r32     t        = ray_on_mesh(assets.models.models[entity.model].mesh, transform_point(to_model, origin),
+                                       transform_vector(to_model, direction), nearest);
+        if (t < nearest)
+        {
+            nearest = t;
+            found   = entity.id;
+        }
+    }
+    return found;
 }
 
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets)

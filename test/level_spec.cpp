@@ -228,3 +228,37 @@ TEST_CASE("add_entity gives each entity a new id, kept as others are removed", "
     level->entity_count = LEVEL_MAX_ENTITIES;
     REQUIRE(add_entity(level.get(), {}) == nullptr);
 }
+
+TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[level]")
+{
+    auto level  = std::make_unique<Level>();
+    auto assets = std::make_unique<Level_Assets>();
+    alignas(4) u8 storage[256];
+    build_plane(&assets->models.models[0].mesh, 1.0f, 1.0f, storage, sizeof(storage));
+    assets->models.count = 1;
+
+    // Two squares, one above the other, and one turned upright to the side.
+    Entity &low  = *add_entity(level.get(), {});
+    Entity &high = *add_entity(level.get(), {});
+    Entity &wall = *add_entity(level.get(), {});
+    low.model     = high.model = wall.model = 0;
+    high.position = { 0.0f, 2.0f, 0.0f };
+    wall.position = { 5.0f, 0.0f, 0.0f };
+    wall.rotation = { 0.0f, 0.0f, 90.0f };
+    wall.scale    = { 3.0f, 1.0f, 3.0f };
+    add_entity(level.get(), {}); // No model: never in the way
+
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }) == high.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.5f, 1.0f, 0.5f }, { 0.0f, -1.0f, 0.0f }) == low.id);
+    // From under, through their backs.
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, -10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == low.id);
+    // Behind where the ray starts.
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 2.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }) == NO_ID);
+    // Turned upright and 3 times as big: from -3 to 3 up and across.
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == wall.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 3.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
+
+    wall.scale = { 0.0f, 1.0f, 3.0f };
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
+}
