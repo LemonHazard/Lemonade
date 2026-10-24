@@ -30,6 +30,32 @@ inline u64 mesh_storage_size(u32 vertex_count, u32 index_count)
     return (u64)vertex_count * sizeof(Mesh_Vertex) + (u64)index_count * sizeof(u32);
 }
 
+// A box along the axes, from its least corner to its greatest.
+struct Bounds3
+{
+    Vector3 min;
+    Vector3 max;
+};
+
+// Around the mesh's vertices: all 0 when it has none.
+inline Bounds3 mesh_bounds(const Mesh &mesh)
+{
+    if (!mesh.vertex_count) return {};
+
+    Bounds3 bounds = { mesh.vertices[0].position, mesh.vertices[0].position };
+    for (u32 i = 1; i < mesh.vertex_count; ++i)
+    {
+        const Vector3 &p = mesh.vertices[i].position;
+        if (p.x < bounds.min.x) bounds.min.x = p.x;
+        if (p.y < bounds.min.y) bounds.min.y = p.y;
+        if (p.z < bounds.min.z) bounds.min.z = p.z;
+        if (p.x > bounds.max.x) bounds.max.x = p.x;
+        if (p.y > bounds.max.y) bounds.max.y = p.y;
+        if (p.z > bounds.max.z) bounds.max.z = p.z;
+    }
+    return bounds;
+}
+
 // A square on the XZ plane around the origin, facing up (+Y), with a texture repeating
 // every `tile_size` across it. Its vertices and indices are written to `storage`; the
 // mesh points into it. Returns the bytes used, or 0 when they don't fit, leaving `mesh`

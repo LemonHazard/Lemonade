@@ -4,6 +4,7 @@
 #include "logger.h"
 #include "render_commands.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -113,6 +114,20 @@ static Json script_data_to_json(const Entity &entity, const Script_Info &script)
     return json;
 }
 
+u32 asset_model(Level_Assets *assets, const char *path)
+{
+    u32 index;
+    u64 used = library_model(&assets->models, path, &assets->textures, &index, assets->storage + assets->storage_used,
+                             assets->storage_size - assets->storage_used);
+    if (index == NO_MODEL || !used) return index; // Logged, or loaded before
+
+    assets->storage_used += used;
+    const Model &model = assets->models.models[index];
+    for (u32 i = 0; i < model.part_count; ++i) assets->model_emissive[index][i] = model.parts[i].material.emissive;
+    assets->model_bounds[index] = mesh_bounds(model.mesh);
+    return index;
+}
+
 void load_level(Level *level, Level_Assets *assets, const char *path, std::span<const Script_Info> scripts)
 {
     // `path` may be the level's own, to load it again.
@@ -129,8 +144,8 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
     else if (!Json::parse(text, &json))
         log_error("Could not parse the level \"%s\"", path);
 
-    u64 used_before = assets->storage_used;
-    u32 new_models  = 0;
+    u64 used_before   = assets->storage_used;
+    u32 models_before = assets->models.count;
 
     for (const Json_Member &member : json["models"].members)
     {
@@ -145,29 +160,17 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
             continue;
         }
 
-        u32 index;
-        u64 used = library_model(&assets->models, member.value["file"].string.c_str(), &assets->textures, &index,
-                                 assets->storage + assets->storage_used, assets->storage_size - assets->storage_used);
+        u32 index = asset_model(assets, member.value["file"].string.c_str());
         if (index == NO_MODEL) continue; // Logged: it's tried again on the next load
-
-        Model &model = assets->models.models[index];
-        if (used)
-        {
-            assets->storage_used += used;
-            for (u32 i = 0; i < model.part_count; ++i) assets->model_emissive[index][i] = model.parts[i].material.emissive;
-            ++new_models;
-        }
 
         // Unity's emission of 1 is as bright as a lit wall: flames are far brighter, enough
         // to glow through the bloom in daylight.
-        r32 emissive_scale = member.value["emissive_scale"].float_or(1.0f);
-        for (u32 i = 0; i < model.part_count; ++i) model.parts[i].material.emissive = assets->model_emissive[index][i] * emissive_scale;
-
         Level_Model &level_model = level->models[level->model_count++];
         snprintf(level_model.name, sizeof(level_model.name), "%s", member.key.c_str());
         level_model.model          = index;
-        level_model.emissive_scale = emissive_scale;
+        level_model.emissive_scale = member.value["emissive_scale"].float_or(1.0f);
     }
+    scale_level_emission(*level, assets);
 
     // NO_MODEL when the level has none of that name (logged).
     auto find_model = [&](std::string_view name) -> u32
@@ -233,7 +236,7 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
     }
 
     log_info("Loaded the level \"%s\": %u entities, %u new models (%.0f MiB), %u models in all (%.0f MiB)", path,
-             level->entity_count, new_models, (r64)(assets->storage_used - used_before) / MiB, assets->models.count,
+             level->entity_count, assets->models.count - models_before, (r64)(assets->storage_used - used_before) / MiB, assets->models.count,
              (r64)assets->storage_used / MiB);
 }
 
@@ -327,6 +330,41 @@ u32 level_model(const Level &level, u32 model)
     return i;
 }
 
+void scale_level_emission(const Level &level, Level_Assets *assets)
+{
+    for (u32 i = 0; i < level.model_count; ++i)
+    {
+        const Level_Model &named = level.models[i];
+        Model             &model = assets->models.models[named.model];
+        for (u32 part = 0; part < model.part_count; ++part)
+            model.parts[part].material.emissive = assets->model_emissive[named.model][part] * named.emissive_scale;
+    }
+}
+
+// How far along the ray, in `direction`s, it gets into the box, or 0 when it starts in
+// it: INFINITY when it misses it, or the box is behind it.
+static r32 ray_on_box(const Bounds3 &box, Vector3 origin, Vector3 direction)
+{
+    r32 enters = 0.0f;
+    r32 leaves = INFINITY;
+    for (u32 axis = 0; axis < 3; ++axis)
+    {
+        r32 from = origin[axis];
+        r32 step = direction[axis];
+        if (step == 0.0f)
+        {
+            if (from < box.min[axis] || from > box.max[axis]) return INFINITY;
+            continue;
+        }
+        r32 to_min = (box.min[axis] - from) / step;
+        r32 to_max = (box.max[axis] - from) / step;
+        enters = std::max(enters, std::min(to_min, to_max));
+        leaves = std::min(leaves, std::max(to_min, to_max));
+        if (enters > leaves) return INFINITY;
+    }
+    return enters;
+}
+
 // How far along the ray, in `direction`s, it first goes through one of the mesh's
 // triangles, either side, if that's nearer than `nearest`: `nearest` when it isn't.
 static r32 ray_on_mesh(const Mesh &mesh, Vector3 origin, Vector3 direction, r32 nearest)
@@ -360,7 +398,7 @@ static r32 ray_on_mesh(const Mesh &mesh, Vector3 origin, Vector3 direction, r32 
     return nearest;
 }
 
-u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction)
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, r32 *distance)
 {
     // Each model is met in its own space: how far along the ray is the same there.
     u32 found   = NO_ID;
@@ -371,15 +409,21 @@ u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin
         Matrix4 transform = entity_transform(entity);
         if (entity.model == NO_MODEL || determinant3x3(transform) == 0.0f) continue; // Not there, or flattened
 
-        Matrix4 to_model = inverse(transform);
-        r32     t        = ray_on_mesh(assets.models.models[entity.model].mesh, transform_point(to_model, origin),
-                                       transform_vector(to_model, direction), nearest);
+        // Its triangles are all in its bounds: one whose bounds are further than the
+        // nearest so far, or missed, isn't in the way.
+        Matrix4 to_model  = inverse(transform);
+        Vector3 from      = transform_point(to_model, origin);
+        Vector3 along     = transform_vector(to_model, direction);
+        if (ray_on_box(assets.model_bounds[entity.model], from, along) >= nearest) continue;
+
+        r32 t = ray_on_mesh(assets.models.models[entity.model].mesh, from, along, nearest);
         if (t < nearest)
         {
             nearest = t;
             found   = entity.id;
         }
     }
+    if (distance) *distance = nearest;
     return found;
 }
 

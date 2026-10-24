@@ -235,7 +235,8 @@ TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[
     auto assets = std::make_unique<Level_Assets>();
     alignas(4) u8 storage[256];
     build_plane(&assets->models.models[0].mesh, 1.0f, 1.0f, storage, sizeof(storage));
-    assets->models.count = 1;
+    assets->model_bounds[0] = mesh_bounds(assets->models.models[0].mesh);
+    assets->models.count    = 1;
 
     // Two squares, one above the other, and one turned upright to the side.
     Entity &low  = *add_entity(level.get(), {});
@@ -248,17 +249,42 @@ TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[
     wall.scale    = { 3.0f, 1.0f, 3.0f };
     add_entity(level.get(), {}); // No model: never in the way
 
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }) == high.id);
+    r32 distance = 0.0f;
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, &distance) == high.id);
+    REQUIRE(distance == 8.0f);
     REQUIRE(entity_on_ray(*level, *assets, { 0.5f, 1.0f, 0.5f }, { 0.0f, -1.0f, 0.0f }) == low.id);
     // From under, through their backs.
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, -10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == low.id);
     // Behind where the ray starts.
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == NO_ID);
-    REQUIRE(entity_on_ray(*level, *assets, { 2.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 2.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, &distance) == NO_ID);
+    REQUIRE(distance == INFINITY);
     // Turned upright and 3 times as big: from -3 to 3 up and across.
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == wall.id);
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 3.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
 
     wall.scale = { 0.0f, 1.0f, 3.0f };
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
+}
+
+TEST_CASE("scale_level_emission scales the models' emission as loaded by the level's", "[level]")
+{
+    auto level  = std::make_unique<Level>();
+    auto assets = std::make_unique<Level_Assets>();
+    assets->models.count                = 1;
+    assets->models.models[0].part_count = 1;
+    assets->model_emissive[0][0]        = { 1.0f, 0.5f, 0.0f };
+    level->models[0]                    = { "lamp", 0, 4.0f };
+    level->model_count                  = 1;
+
+    scale_level_emission(*level, assets.get());
+    Vector3 emissive = assets->models.models[0].parts[0].material.emissive;
+    REQUIRE(emissive.x == 4.0f);
+    REQUIRE(emissive.y == 2.0f);
+    REQUIRE(emissive.z == 0.0f);
+
+    // Another level's scale for it, then this one's again.
+    level->models[0].emissive_scale = 1.0f;
+    scale_level_emission(*level, assets.get());
+    REQUIRE(assets->models.models[0].parts[0].material.emissive.x == 1.0f);
 }

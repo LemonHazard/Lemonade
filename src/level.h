@@ -116,6 +116,7 @@ struct Level_Assets
     u64             storage_used;
     Model_Library   models;
     Vector3         model_emissive[MODEL_LIBRARY_SIZE][MODEL_MAX_PARTS]; // Their parts' emission as loaded, before levels scale it
+    Bounds3         model_bounds[MODEL_LIBRARY_SIZE];                    // Around their meshes, in their own space
     Texture_Library textures;
 };
 
@@ -143,6 +144,11 @@ struct Level
     u32         entity_count;
     u32         last_id;               // The highest it has given: the next entity added gets the one after
 };
+
+// The .glb at `path` in the assets, loaded into their storage the first time it's asked
+// for, as library_model() loads it: its index into the assets' models, or NO_MODEL when
+// it can't be loaded (logged).
+u32 asset_model(Level_Assets *assets, const char *path);
 
 // Loads the JSON level file at `path` over whatever was in `level`, and the models it
 // has that weren't loaded yet. In it:
@@ -179,10 +185,17 @@ Entity *add_entity(Level *level, const Entity &entity);
 // The level's first name for `model`, into Level::models, or model_count.
 u32 level_model(const Level &level, u32 model);
 
+// Sets the level's models' emission to theirs as loaded times the level's
+// emissive_scale for them. Levels share models, and each has its own scales: it's done
+// as a level is loaded, and again whenever it's shown after another.
+void scale_level_emission(const Level &level, Level_Assets *assets);
+
 // The id of the nearest of the level's entities whose model is in the way of the ray
 // from `origin` along `direction`, through either side of its triangles: NO_ID when
-// none is. Those without a model are never in the way.
-u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction);
+// none is. Those without a model are never in the way. `distance`, when given, is how
+// far along the ray it is, in `direction`s: INFINITY when none is.
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction,
+                  r32 *distance = nullptr);
 
 // What the level looks like: its entities' models, and its lighting.
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets);
