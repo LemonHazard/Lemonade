@@ -2,6 +2,9 @@
 
 #include "level.h"
 
+struct Render_Commands;
+struct World;
+
 #include <span>
 #include <string_view>
 #include <vector>
@@ -42,9 +45,11 @@ std::string_view palette_category(std::string_view name);
 // What the palette shows, kept in the world (see world.h) while the editor's open.
 struct Palette
 {
-    bool    open;                   // Its window is open, and the world shows its level instead of the game's
-    Level   level;                  // The group's models, on the ground
-    char    group[LEVEL_PATH_SIZE]; // Its folder and name: none before one is shown
+    bool        open;                   // Its window is open, and the world shows its level instead of the game's
+    Level       level;                  // The group's models, on the ground
+    char        group[LEVEL_PATH_SIZE]; // Its folder and name: none before one is shown
+    bool        loaded;                 // The assets past `mark` are the level's, loaded for it
+    Assets_Mark mark;
     u32     ground;                 // The id of the ground's entity in the level: NO_ID when it has none
     u32     selected;               // The id of the model picked in it
 
@@ -56,9 +61,16 @@ struct Palette
     r32     distance;
 };
 
-// Makes the palette's level the models in `files`, loaded into `assets` if they weren't,
-// on the model in `ground` (none when null) at the origin, lit by `lighting`. They stand
-// on the ground (y = 0) in rows from -Z to +Z, left to right in each, with room
-// around each for its size, the rows around the origin. Its camera looks at all of them.
-void show_palette_models(Palette *palette, Level_Assets *assets, std::span<const str> files, const char *ground,
-                         const Lighting &lighting);
+// Makes the world's palette's level the models in `files`, on the model in `ground`
+// (none when null) at the origin, lit as the game's level. What was loaded for the
+// level it had is let go of first (see release_palette()), and what wasn't loaded yet
+// of these is loaded, to be let go of in turn. They stand on the ground (y = 0) in rows
+// from -Z to +Z, left to right in each, with room around each for its size, the rows
+// around the origin. Its camera looks at all of them.
+void show_palette_models(World *world, std::span<const str> files, const char *ground, Render_Commands *commands);
+
+// Lets go of the models and textures loaded for the palette's level (see
+// release_assets()), and empties it. The game's level keeps its models, and so does the
+// editor the one it places: those it had of them are loaded again, and their indices
+// changed to the new ones (a model that can't be is left out, logged).
+void release_palette(World *world, Render_Commands *commands);

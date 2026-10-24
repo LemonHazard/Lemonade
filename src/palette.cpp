@@ -1,6 +1,7 @@
 #include "palette.h"
 #include "file.h"
 #include "logger.h"
+#include "world.h"
 
 #include <algorithm>
 #include <cmath>
@@ -122,15 +123,75 @@ static r32 palette_distance(r32 pitch, Vector3 half)
     return furthest;
 }
 
-void show_palette_models(Palette *palette, Level_Assets *assets, std::span<const str> files, const char *ground,
-                         const Lighting &lighting)
+void release_palette(World *world, Render_Commands *commands)
 {
+    Palette      &palette = world->palette;
+    Level_Assets &assets  = world->assets;
+    Level        &level   = world->level;
+    palette.level    = {};
+    palette.ground   = NO_ID;
+    palette.selected = NO_ID;
+    if (!palette.loaded) return;
+    palette.loaded = false;
+
+    // What's kept of what's let go of, by its index then: its path goes with it.
+    const Assets_Mark                &mark     = palette.mark;
+    auto                              released = [&](u32 model) { return model != NO_MODEL && model >= mark.model_count; };
+    std::vector<std::pair<u32, str>> kept;
+    auto keep = [&](u32 model)
+    {
+        if (!released(model)) return;
+        for (const auto &[index, path] : kept)
+            if (index == model) return;
+        kept.push_back({ model, assets.models.paths[model] });
+    };
+    for (u32 i = 0; i < level.model_count; ++i) keep(level.models[i].model);
+    if (world->placing) keep(world->placed);
+
+    u32 models = assets.models.count - mark.model_count;
+    r64 size   = (r64)(assets.storage_used - mark.storage_used) / MiB;
+    release_assets(&assets, mark, commands);
+    log_info("Let go of the palette's %u models (%.0f MiB), %u of them the level's", models, size, (u32)kept.size());
+
+    std::vector<std::pair<u32, u32>> moved;
+    for (const auto &[index, path] : kept) moved.push_back({ index, asset_model(&assets, path.c_str()) });
+    auto now = [&](u32 model)
+    {
+        if (!released(model)) return model;
+        for (const auto &[before, after] : moved)
+            if (before == model) return after;
+        return NO_MODEL;
+    };
+
+    u32 count = 0;
+    for (u32 i = 0; i < level.model_count; ++i)
+    {
+        Level_Model named = level.models[i];
+        named.model       = now(named.model);
+        if (named.model == NO_MODEL)
+            log_error("\"%s\" has its model \"%s\" left out: it couldn't be loaded again", level.path, named.name);
+        else
+            level.models[count++] = named;
+    }
+    level.model_count = count;
+    for (u32 i = 0; i < level.entity_count; ++i) level.entities[i].model = now(level.entities[i].model);
+
+    if (world->placing) world->placed = now(world->placed);
+    if (world->placed == NO_MODEL) world->placing = false;
+}
+
+void show_palette_models(World *world, std::span<const str> files, const char *ground, Render_Commands *commands)
+{
+    release_palette(world, commands);
+
+    Palette      *palette = &world->palette;
+    Level_Assets *assets  = &world->assets;
+    palette->mark   = mark_assets(*assets);
+    palette->loaded = true;
+
     Level &level = palette->level;
-    level                = {};
-    level.lighting       = lighting;
-    level.saved_lighting = lighting;
-    palette->ground      = NO_ID;
-    palette->selected    = NO_ID;
+    level.lighting       = world->level.lighting;
+    level.saved_lighting = world->level.lighting;
 
     if (ground)
     {

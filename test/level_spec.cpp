@@ -2,6 +2,7 @@
 
 #include "file.h"
 #include "level.h"
+#include "render_commands.h"
 
 #include <cstddef>
 #include <filesystem>
@@ -318,4 +319,44 @@ TEST_CASE("scale_level_emission scales the models' emission as loaded by the lev
     level->models[0].emissive_scale = 1.0f;
     scale_level_emission(*level, assets.get());
     REQUIRE(assets->models.models[0].parts[0].material.emissive.x == 1.0f);
+}
+
+TEST_CASE("release_assets lets go of what's loaded after the mark, and has the renderer forget it", "[level]")
+{
+    auto assets = std::make_unique<Level_Assets>();
+    alignas(16) static u8 storage[1024];
+    assets->storage        = storage;
+    assets->storage_size   = sizeof(storage);
+    assets->storage_used   = 256;
+    assets->models.count   = 2;
+    assets->textures.count = 1;
+
+    Assets_Mark mark = mark_assets(*assets);
+    REQUIRE(mark.storage_used == 256);
+    REQUIRE(mark.model_count == 2);
+    REQUIRE(mark.texture_count == 1);
+
+    assets->storage_used   = 768;
+    assets->models.count   = 5;
+    assets->textures.count = 3;
+
+    alignas(std::max_align_t) u8 buffer[128];
+    Render_Commands commands = {};
+    commands.buffer   = buffer;
+    commands.capacity = sizeof(buffer);
+    release_assets(assets.get(), mark, &commands);
+
+    REQUIRE(assets->storage_used == 256);
+    REQUIRE(assets->models.count == 2);
+    REQUIRE(assets->textures.count == 1);
+
+    auto *forget = (Render_Command_Forget_Memory *)buffer;
+    REQUIRE(forget->header.type == Render_Command_Type::Forget_Memory);
+    REQUIRE(forget->begin == storage + 256);
+    REQUIRE(forget->end == storage + 768);
+
+    // With nothing loaded since, there's nothing to forget.
+    commands.used = 0;
+    release_assets(assets.get(), mark, &commands);
+    REQUIRE(commands.used == 0);
 }

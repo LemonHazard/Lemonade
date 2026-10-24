@@ -145,6 +145,25 @@ struct Level
     u32         last_id;               // The highest it has given: the next entity added gets the one after
 };
 
+// How much of the assets is loaded, to let go of what's loaded after it (see
+// release_assets()).
+struct Assets_Mark
+{
+    u64 storage_used;
+    u32 model_count;
+    u32 texture_count;
+};
+
+inline Assets_Mark mark_assets(const Level_Assets &assets)
+{
+    return { assets.storage_used, assets.models.count, assets.textures.count };
+}
+
+// Lets go of the models and textures loaded since `mark`, their storage to be used for
+// others, and has the renderer forget them (see push_forget_memory()). Their indices
+// are others' from then on: nothing may still have them.
+void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Commands *commands);
+
 // The .glb at `path` in the assets, loaded into their storage the first time it's asked
 // for, as library_model() loads it: its index into the assets' models, or NO_MODEL when
 // it can't be loaded (logged).

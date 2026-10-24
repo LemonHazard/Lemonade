@@ -128,6 +128,16 @@ u32 asset_model(Level_Assets *assets, const char *path)
     return index;
 }
 
+void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Commands *commands)
+{
+    if (mark.storage_used < assets->storage_used)
+        push_forget_memory(commands, assets->storage + mark.storage_used, assets->storage + assets->storage_used);
+
+    assets->storage_used   = mark.storage_used;
+    assets->models.count   = mark.model_count;
+    assets->textures.count = mark.texture_count;
+}
+
 void load_level(Level *level, Level_Assets *assets, const char *path, std::span<const Script_Info> scripts)
 {
     // `path` may be the level's own, to load it again.

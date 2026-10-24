@@ -30,10 +30,10 @@ void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &ga
 
     // The game's level waits while the palette's is shown. They share models, each with
     // its own emission for them.
+    if (palette_shown(*world)) view_palette(world, frame); // May go back to the game's
     if (palette_shown(*world))
     {
         Level &palette = world->palette.level;
-        view_palette(world, frame);
         scale_level_emission(palette, &world->assets);
         frame->render->sky_background = true;
         push_level(frame->render, palette, world->assets);

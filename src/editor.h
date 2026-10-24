@@ -16,9 +16,10 @@ struct World;
 //
 // The palette (see palette.h) takes the window's place while it's open: its window has
 // a header for each of the game's model folders, with a button for each group of models
-// in it that shows them on their own, in the palette's level (see view_palette()). Back
-// in the editor, the model picked in it is placed in the game's level (see
-// edit_in_view()).
+// in it that shows them on their own, in the palette's level (see view_palette()),
+// letting go of the models it showed before (see release_palette()). Back in the
+// editor, the model picked in it is placed in the game's level (see edit_in_view()),
+// and the palette's others are let go of: it loads its group again when it's opened.
 void update_editor(World *world, Game_Frame *frame, const Game_Definition &game);
 
 // The editor in the level as it's seen, once the frame's camera is set (its

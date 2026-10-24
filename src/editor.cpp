@@ -187,15 +187,46 @@ void edit_level_lighting(Level *level)
 static std::vector<Palette_Folder> palette_folders;
 static bool                        palette_read;
 
-static void open_palette(World *world, const Game_Definition &game)
+static void read_palette_folders(const Game_Definition &game)
+{
+    if (palette_read) return;
+    palette_folders = read_palette(game.model_folder);
+    palette_read    = true;
+}
+
+// The group the palette showed last, loaded again as its camera left it, or none.
+static void open_palette(World *world, const Game_Definition &game, Render_Commands *commands)
 {
     Palette &palette = world->palette;
     palette.open = true;
-    if (!palette.group[0]) show_palette_models(&palette, &world->assets, {}, game.palette_ground, world->level.lighting);
+    read_palette_folders(game);
+
+    const Palette_Group *shown = nullptr;
+    for (const Palette_Folder &folder : palette_folders)
+        for (const Palette_Group &group : folder.groups)
+            if (folder.name + ": " + group.name == palette.group) shown = &group;
+
+    if (!shown)
+    {
+        palette.group[0] = 0;
+        show_palette_models(world, {}, game.palette_ground, commands);
+        return;
+    }
+
+    Vector3 focus    = palette.focus;
+    r32     yaw      = palette.yaw;
+    r32     pitch    = palette.pitch;
+    r32     distance = palette.distance;
+    show_palette_models(world, shown->files, game.palette_ground, commands);
+    palette.focus    = focus;
+    palette.yaw      = yaw;
+    palette.pitch    = pitch;
+    palette.distance = distance;
 }
 
-// Back to the editor, placing the model picked in the palette, if one is.
-static void close_palette(World *world)
+// Back to the editor, placing the model picked in the palette, if one is: the rest of
+// what it loaded is let go of.
+static void close_palette(World *world, Render_Commands *commands)
 {
     Palette      &palette = world->palette;
     const Entity *picked  = entity_with_id(palette.level, palette.selected);
@@ -205,18 +236,15 @@ static void close_palette(World *world)
         world->placing = true;
         world->placed  = picked->model;
     }
+    release_palette(world, commands);
 }
 
 // Its window: what's picked, how much is loaded, and the folders' groups to show.
-static void edit_palette(World *world, const Game_Definition &game)
+static void edit_palette(World *world, const Game_Definition &game, Render_Commands *commands)
 {
     Palette            &palette = world->palette;
     const Level_Assets &assets  = world->assets;
-    if (!palette_read)
-    {
-        palette_folders = read_palette(game.model_folder);
-        palette_read    = true;
-    }
+    read_palette_folders(game);
 
     ImGui::SetNextWindowPos({ 16.0f, 16.0f }, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize({ 360.0f, 480.0f }, ImGuiCond_FirstUseEver);
@@ -232,7 +260,7 @@ static void edit_palette(World *world, const Game_Definition &game)
         else
             ImGui::TextDisabled("Click a model to place it");
 
-        // Nothing loaded is let go of: what's looked through stays until the game ends.
+        // With the group's models, let go of as another is shown or the palette closes.
         ImGui::TextDisabled("%u of %u models loaded, %.0f of %.0f MiB", assets.models.count, MODEL_LIBRARY_SIZE,
                             (r64)assets.storage_used / MiB, (r64)assets.storage_size / MiB);
         ImGui::TextDisabled("WASD moves, the arrows turn and zoom");
@@ -259,8 +287,7 @@ static void edit_palette(World *world, const Game_Definition &game)
                 if (current) ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
                 if (ImGui::Button(group.name.c_str()))
                 {
-                    show_palette_models(&palette, &world->assets, group.files, game.palette_ground,
-                                        world->level.lighting);
+                    show_palette_models(world, group.files, game.palette_ground, commands);
                     snprintf(palette.group, sizeof(palette.group), "%s", shown);
                 }
                 if (current) ImGui::PopStyleColor();
@@ -282,7 +309,7 @@ static void edit_palette(World *world, const Game_Definition &game)
     }
     ImGui::End();
 
-    if (!open) close_palette(world);
+    if (!open) close_palette(world, commands);
 }
 
 void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
@@ -295,7 +322,7 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
     if (!world->editing) return;
     if (world->palette.open)
     {
-        edit_palette(world, game);
+        edit_palette(world, game, frame->render);
         return;
     }
 
@@ -317,7 +344,7 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
         if (ImGui::Button("Save")) save_level(&level, world->assets, level.path, scripts);
         ImGui::SameLine();
         ImGui::BeginDisabled(!game.model_folder);
-        if (ImGui::Button("Palette")) open_palette(world, game);
+        if (ImGui::Button("Palette")) open_palette(world, game, frame->render);
         ImGui::EndDisabled();
 
         if (world->placing)
@@ -542,7 +569,7 @@ void view_palette(World *world, Game_Frame *frame)
         if (named < palette.level.model_count) ImGui::SetTooltip("%s", palette.level.models[named].name);
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) palette.selected = pointed ? pointed->id : NO_ID;
-        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && pointed) close_palette(world);
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && pointed) close_palette(world, frame->render);
     }
 
     const Entity *picked = entity_with_id(palette.level, palette.selected);
