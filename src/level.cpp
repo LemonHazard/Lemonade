@@ -330,6 +330,30 @@ u32 level_model(const Level &level, u32 model)
     return i;
 }
 
+u32 add_level_model(Level *level, const Level_Assets &assets, u32 model)
+{
+    u32 index = level_model(*level, model);
+    if (index < level->model_count || level->model_count == LEVEL_MAX_MODELS) return index;
+
+    // A name another model has, or a file without one, gets a number after it.
+    std::string_view file = file_stem(assets.models.paths[model]);
+    char             name[LEVEL_NAME_SIZE];
+    snprintf(name, sizeof(name), "%.*s", (int)file.size(), file.data());
+    for (u32 number = 2;; ++number)
+    {
+        bool taken = !name[0];
+        for (u32 i = 0; i < level->model_count && !taken; ++i) taken = strcmp(level->models[i].name, name) == 0;
+        if (!taken) break;
+        snprintf(name, sizeof(name), "%.*s_%u", (int)std::min(file.size(), (size_t)LEVEL_NAME_SIZE - 12), file.data(), number);
+    }
+
+    Level_Model &added = level->models[level->model_count];
+    snprintf(added.name, sizeof(added.name), "%s", name);
+    added.model          = model;
+    added.emissive_scale = 1.0f;
+    return level->model_count++;
+}
+
 void scale_level_emission(const Level &level, Level_Assets *assets)
 {
     for (u32 i = 0; i < level.model_count; ++i)

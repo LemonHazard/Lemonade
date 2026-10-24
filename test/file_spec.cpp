@@ -26,3 +26,12 @@ TEST_CASE("read_file gives nothing for a file that isn't there", "[file]")
     REQUIRE(read_file("lemonade_file_spec_missing/none.bin").empty());
     REQUIRE_FALSE(write_file("lemonade_file_spec_missing/none.bin", "data"));
 }
+
+TEST_CASE("file_stem is the file's name without its folders or extension", "[file]")
+{
+    REQUIRE(file_stem("models/POLYGON/SM_Prop_Barrel_01.glb") == "SM_Prop_Barrel_01");
+    REQUIRE(file_stem("models\\cube.glb") == "cube");
+    REQUIRE(file_stem("plain") == "plain");
+    REQUIRE(file_stem("archive.tar.gz") == "archive.tar");
+    REQUIRE(file_stem("folder.d/.hidden") == ".hidden");
+}

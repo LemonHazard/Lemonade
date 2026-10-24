@@ -185,6 +185,12 @@ Entity *add_entity(Level *level, const Entity &entity);
 // The level's first name for `model`, into Level::models, or model_count.
 u32 level_model(const Level &level, u32 model);
 
+// As level_model(), but a model the level has no name for gets one, from its file's
+// name ("SM_Prop_Barrel_01" for models/SM_Prop_Barrel_01.glb, with _2, _3... after it
+// when another has that one), and its emission as loaded: model_count when the level is
+// full.
+u32 add_level_model(Level *level, const Level_Assets &assets, u32 model);
+
 // Sets the level's models' emission to theirs as loaded times the level's
 // emissive_scale for them. Levels share models, and each has its own scales: it's done
 // as a level is loaded, and again whenever it's shown after another.

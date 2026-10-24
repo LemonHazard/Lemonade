@@ -267,6 +267,37 @@ TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
 }
 
+TEST_CASE("add_level_model names a model the level hasn't by its file", "[level]")
+{
+    auto level  = std::make_unique<Level>();
+    auto assets = std::make_unique<Level_Assets>();
+    assets->models.count = 3;
+    snprintf(assets->models.paths[0], MODEL_PATH_SIZE, "models/props/SM_Prop_Barrel_01.glb");
+    snprintf(assets->models.paths[1], MODEL_PATH_SIZE, "models/other/SM_Prop_Barrel_01.glb");
+    snprintf(assets->models.paths[2], MODEL_PATH_SIZE, "models/cube.glb");
+
+    level->models[0]   = { "cube", 2, 3.0f };
+    level->model_count = 1;
+
+    // One it has keeps its name.
+    REQUIRE(add_level_model(level.get(), *assets, 2) == 0);
+    REQUIRE(level->model_count == 1);
+
+    REQUIRE(add_level_model(level.get(), *assets, 0) == 1);
+    REQUIRE(std::string(level->models[1].name) == "SM_Prop_Barrel_01");
+    REQUIRE(level->models[1].model == 0);
+    REQUIRE(level->models[1].emissive_scale == 1.0f);
+
+    // Another file of the same name.
+    REQUIRE(add_level_model(level.get(), *assets, 1) == 2);
+    REQUIRE(std::string(level->models[2].name) == "SM_Prop_Barrel_01_2");
+    REQUIRE(add_level_model(level.get(), *assets, 0) == 1);
+
+    level->model_count     = LEVEL_MAX_MODELS;
+    level->models[0].model = 0;
+    REQUIRE(add_level_model(level.get(), *assets, 2) == LEVEL_MAX_MODELS);
+}
+
 TEST_CASE("scale_level_emission scales the models' emission as loaded by the level's", "[level]")
 {
     auto level  = std::make_unique<Level>();

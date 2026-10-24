@@ -33,3 +33,12 @@ bool write_file(const char *path, std::string_view data)
     if (fclose(file) != 0) written = false;
     return written;
 }
+
+std::string_view file_stem(std::string_view path)
+{
+    size_t slash = path.find_last_of("/\\");
+    if (slash != std::string_view::npos) path.remove_prefix(slash + 1);
+    size_t dot = path.rfind('.');
+    if (dot != std::string_view::npos && dot) path = path.substr(0, dot);
+    return path;
+}
