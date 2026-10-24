@@ -45,7 +45,7 @@ u64 library_texture(Texture_Library *library, const char *path, Texture *texture
 // Models loaded from .glb files, once each however many times they're asked for. Like
 // the texture library, it keeps their paths in itself, and they keep their indices.
 
-constexpr u32 MODEL_LIBRARY_SIZE = 256;
+constexpr u32 MODEL_LIBRARY_SIZE = 4096;
 constexpr u32 MODEL_PATH_SIZE    = 256;
 constexpr u32 NO_MODEL           = 0xFFFFFFFF;
 

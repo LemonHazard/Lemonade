@@ -69,7 +69,7 @@ constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
 // Meshes stay on the GPU once drawn, in one buffer of this size: past it, or past
 // this many meshes, new ones aren't drawn.
-constexpr u64 MESH_BUFFER_SIZE     = 128 * MiB;
+constexpr u64 MESH_BUFFER_SIZE     = 512 * MiB;
 constexpr u32 MAX_MESHES           = 4096;
 constexpr u32 MESH_SLOT_BITS       = 13; // The hash table has twice MAX_MESHES slots
 constexpr u32 MESH_SLOTS           = 1u << MESH_SLOT_BITS;
