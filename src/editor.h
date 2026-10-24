@@ -36,10 +36,11 @@ void edit_in_view(World *world, Game_Frame *frame);
 bool palette_shown(const World &world);
 
 // The palette's level as its camera sees it, while it's shown: sets the frame's camera,
-// which a drag with the right button turns, the wheel brings closer and further, and
-// W, A, S and D move. Pointing at a model names it, a click on it picks it, or none,
-// drawn as a wireframe like the editor's, and a double-click goes back to the editor
-// to place it. It's lit as the game's level is.
+// which a drag with the right button or the left and right arrows turn, the wheel or the
+// up and down arrows bring closer and further, and W, A, S and D move. Pointing at a
+// model names it, a click on it picks it, or none, drawn as a wireframe like the
+// editor's, and a double-click goes back to the editor to place it. It's lit as the
+// game's level is.
 void view_palette(World *world, Game_Frame *frame);
 
 // Its parts, for a window of the game's own: make ImGui's context current first.

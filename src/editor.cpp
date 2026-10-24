@@ -235,7 +235,8 @@ static void edit_palette(World *world, const Game_Definition &game)
         // Nothing loaded is let go of: what's looked through stays until the game ends.
         ImGui::TextDisabled("%u of %u models loaded, %.0f of %.0f MiB", assets.models.count, MODEL_LIBRARY_SIZE,
                             (r64)assets.storage_used / MiB, (r64)assets.storage_size / MiB);
-        ImGui::TextDisabled("Right-drag turns, the wheel zooms, WASD moves");
+        ImGui::TextDisabled("WASD moves, the arrows turn and zoom");
+        ImGui::TextDisabled("Right-drag turns too, and the wheel zooms");
 
         const ImGuiStyle &style = ImGui::GetStyle();
         for (const Palette_Folder &folder : palette_folders)
@@ -469,10 +470,13 @@ bool palette_shown(const World &world)
 
 // The palette's camera turns this many degrees for each pixel the pointer is dragged,
 // comes this much closer for each notch of the wheel, and moves this many times as far
-// as it is from what it looks at each second.
-constexpr r32 PALETTE_TURN_SPEED = 0.3f;
-constexpr r32 PALETTE_ZOOM_STEP  = 0.85f;
-constexpr r32 PALETTE_MOVE_SPEED = 0.75f;
+// as it is from what it looks at each second. With the arrow keys, it turns this many
+// degrees a second, and comes closer or goes further by this much of how far it is.
+constexpr r32 PALETTE_TURN_SPEED     = 0.3f;
+constexpr r32 PALETTE_ZOOM_STEP      = 0.85f;
+constexpr r32 PALETTE_MOVE_SPEED     = 0.75f;
+constexpr r32 PALETTE_KEY_TURN_SPEED = 90.0f;
+constexpr r32 PALETTE_KEY_ZOOM_SPEED = 1.5f;
 
 void view_palette(World *world, Game_Frame *frame)
 {
@@ -485,11 +489,24 @@ void view_palette(World *world, Game_Frame *frame)
     {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
         {
-            palette.yaw   = std::remainder(palette.yaw - io.MouseDelta.x * PALETTE_TURN_SPEED, 360.0f);
+            palette.yaw  -= io.MouseDelta.x * PALETTE_TURN_SPEED;
             palette.pitch = clamp(palette.pitch + io.MouseDelta.y * PALETTE_TURN_SPEED, -30.0f, 89.0f);
         }
-        palette.distance = clamp(palette.distance * std::pow(PALETTE_ZOOM_STEP, io.MouseWheel), 0.25f, 2000.0f);
+        palette.distance *= std::pow(PALETTE_ZOOM_STEP, io.MouseWheel);
     }
+
+    // As the follow camera's keys: up and down arrows bring it closer and further, left
+    // and right turn it clockwise and counter-clockwise around what it looks at.
+    if (!io.WantCaptureKeyboard)
+    {
+        r32 zoom = std::exp(PALETTE_KEY_ZOOM_SPEED * frame->dt);
+        if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    palette.distance /= zoom;
+        if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  palette.distance *= zoom;
+        if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  palette.yaw -= PALETTE_KEY_TURN_SPEED * frame->dt;
+        if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) palette.yaw += PALETTE_KEY_TURN_SPEED * frame->dt;
+    }
+    palette.yaw      = std::remainder(palette.yaw, 360.0f);
+    palette.distance = clamp(palette.distance, 0.25f, 2000.0f);
 
     r32     yaw     = radians(palette.yaw);
     r32     pitch   = radians(palette.pitch);
