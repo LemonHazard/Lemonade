@@ -58,6 +58,12 @@ static const u32 ui_vert_spv[] =
 static const u32 ui_frag_spv[] =
 #include "ui.frag.inc"
 ;
+static const u32 wire_vert_spv[] =
+#include "wire.vert.inc"
+;
+static const u32 wire_frag_spv[] =
+#include "wire.frag.inc"
+;
 
 constexpr u32 FRAMES_IN_FLIGHT     = 2;
 constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
@@ -109,6 +115,10 @@ constexpr u32 IRRADIANCE_SIZE      = 16;
 // The bloom is the frame blurred wide: its levels go from half the frame's size down
 // to this many, or to 8 pixels.
 constexpr u32 MAX_BLOOM_LEVELS     = 8;
+// Wireframes are drawn this much nearer than the depth they're tested against, in the
+// depth format's smallest steps (see depthBiasConstantFactor), on top of a pixel's
+// worth of the triangles' slope.
+constexpr r32 WIRE_DEPTH_BIAS      = 16.0f;
 // UI vertices and indices are copied to a buffer of this size each frame: past it, the
 // rest of the frame's UI isn't drawn.
 constexpr u64 UI_BUFFER_SIZE       = 8 * MiB;
@@ -296,6 +306,26 @@ struct Ui_Draw
     r32             scale;         // Pixels per unit of the vertices' positions
 };
 
+// Matches the push constant blocks in shaders/wire.vert and wire.frag.
+struct Wire_Push_Constants
+{
+    Matrix4 model;       // Model to world
+    Vector4 color;       // sRGB-encoded, alpha not premultiplied
+    r32     encode_srgb; // 1 when the swapchain doesn't encode sRGB itself
+};
+
+// A wireframe draw, kept for the end of the frame: they're drawn over it once it's
+// tonemapped, before the UI.
+struct Wire_Draw
+{
+    Wire_Push_Constants push;
+    VkDeviceSize        vertex_offset; // In mesh_buffer
+    VkDeviceSize        vertex_size;
+    VkDeviceSize        index_offset;
+    u32                 first_index;
+    u32                 index_count;
+};
+
 enum class Blend_Mode
 {
     None,
@@ -318,6 +348,7 @@ struct Pipeline_Description
     bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
     u32        view_mask;      // Of the views it draws, as layers of its attachments: 0 for just one
     Blend_Mode blend;          // When it's not None, depth isn't written
+    bool       wireframe;      // Draws triangles' edges, over the depth that's there: depth isn't written
 };
 
 class Native_Renderer
@@ -388,10 +419,12 @@ public:
     // Leaves the shadow map ready to be sampled by the frame's draws.
     void end_shadow_pass(VkCommandBuffer command_buffer);
     // Draws the scene's colors into the swapchain image, fitted to the display, and the
-    // frame's UI over them.
+    // frame's wireframes and UI over them.
     void record_tonemap(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     // Draws the frame's UI draws, in the order they came, inside the tonemapping's rendering.
     void record_ui_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
+    // Draws the frame's wireframes, inside the tonemapping's rendering before the UI.
+    void record_wire_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame);
     // The set UI draws read the texture through, made the first time. VK_NULL_HANDLE
     // when it can't be.
     VkDescriptorSet ui_texture_set(Native_Texture *texture);
@@ -418,6 +451,7 @@ public:
     VkFormat                 shadow_format   = VK_FORMAT_UNDEFINED; // Depth that can be sampled too
     VkFilter                 shadow_filter   = VK_FILTER_NEAREST;   // Linear when shadow_format can be
     bool                     depth_clamp     = false;               // The device feature, enabled when there
+    bool                     wire_lines      = false;               // fillModeNonSolid, for wireframes: enabled when there
 
     VkSwapchainKHR swapchain        = VK_NULL_HANDLE;
     VkExtent2D     swapchain_extent = {};
@@ -449,6 +483,7 @@ public:
     Vector3        camera_position;                 // This frame's
     std::vector<Blended_Draw> blended_draws;        // This frame's, so far
     std::vector<Ui_Draw>      ui_draws;             // This frame's, so far
+    std::vector<Wire_Draw>    wire_draws;           // This frame's, so far
     // The UI mesh last copied to the frame's ui_buffer and where it went: draws of the
     // same one in a row (ImGui's draw lists) share the copy.
     Ui_Mesh                   ui_copied        = {};
@@ -470,6 +505,8 @@ public:
     VkPipeline       sky_pipeline                = VK_NULL_HANDLE;
     VkPipelineLayout ui_pipeline_layout          = VK_NULL_HANDLE;
     VkPipeline       ui_pipeline                 = VK_NULL_HANDLE;
+    VkPipelineLayout wire_pipeline_layout        = VK_NULL_HANDLE;
+    VkPipeline       wire_pipeline               = VK_NULL_HANDLE; // None without wire_lines
     VkDescriptorPool ui_pool                     = VK_NULL_HANDLE; // A set for each texture UI draws use
     VkSampler        ui_sampler                  = VK_NULL_HANDLE; // Linear, clamped to the edges
 
@@ -605,6 +642,8 @@ Renderer::~Renderer()
         if (n->tonemap_pipeline_layout) vkDestroyPipelineLayout(n->device, n->tonemap_pipeline_layout, nullptr);
         if (n->ui_pipeline)             vkDestroyPipeline(n->device, n->ui_pipeline, nullptr);
         if (n->ui_pipeline_layout)      vkDestroyPipelineLayout(n->device, n->ui_pipeline_layout, nullptr);
+        if (n->wire_pipeline)           vkDestroyPipeline(n->device, n->wire_pipeline, nullptr);
+        if (n->wire_pipeline_layout)    vkDestroyPipelineLayout(n->device, n->wire_pipeline_layout, nullptr);
         if (n->ui_pool)                 vkDestroyDescriptorPool(n->device, n->ui_pool, nullptr); // Frees the sets
         if (n->ui_sampler)              vkDestroySampler(n->device, n->ui_sampler, nullptr);
 
@@ -808,6 +847,7 @@ bool Renderer::begin_frame(const Render_Commands &commands)
     n->camera_position = commands.camera_position;
     n->blended_draws.clear();
     n->ui_draws.clear();
+    n->wire_draws.clear();
     n->ui_copied = {};
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
@@ -885,7 +925,7 @@ bool Renderer::begin_frame(const Render_Commands &commands)
         .imageView   = n->depth_view,
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE, // For the wireframes, over the tonemapped frame
         .clearValue  = { .depthStencil = { 1.0f, 0 } }, // Far
     };
     VkRenderingInfo rendering = {
@@ -992,6 +1032,23 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
                            0, sizeof(shadow_push), &shadow_push);
         vkCmdDrawIndexed(shadow_command_buffer, index_count, 1, first_index, 0, 0);
     }
+}
+
+void Renderer::draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
+                              const Vector4 &color)
+{
+    Native_Renderer *n = this->native;
+    if (!n->frame_started || !n->wire_pipeline || index_count == 0) return;
+    if (first_index > mesh.index_count || index_count > mesh.index_count - first_index) return;
+
+    Native_Renderer_Frame &frame = n->frames[n->frame_index];
+    const Native_Mesh *native_mesh = n->find_mesh(mesh, frame);
+    if (!native_mesh) return;
+
+    bool srgb = n->surface_format.format == VK_FORMAT_B8G8R8A8_SRGB || n->surface_format.format == VK_FORMAT_R8G8B8A8_SRGB;
+    Wire_Push_Constants push = { .model = transform, .color = color, .encode_srgb = srgb ? 0.0f : 1.0f };
+    n->wire_draws.push_back({ push, native_mesh->vertex_offset, (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex),
+                              native_mesh->index_offset, first_index, index_count });
 }
 
 void Renderer::draw_ui(const Ui_Mesh &mesh, u32 first_index, u32 index_count, const Texture &texture,
@@ -1437,8 +1494,11 @@ void Native_Renderer::record_bloom(VkCommandBuffer command_buffer)
 
 void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
 {
-    // The scene and its bloom are ready to be read: record_bloom() left them so.
-    VkImageMemoryBarrier2 barriers[1] = {
+    // The scene and its bloom are ready to be read: record_bloom() left them so. Its depth
+    // is read by the wireframes' tests.
+    const VkPipelineStageFlags2 depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    VkImageMemoryBarrier2 barriers[2] = {
         {
             // After the acquire, which the submit waits for at this stage.
             .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1453,10 +1513,23 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer, Native_Rend
             .image               = this->images[this->image_index],
             .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
         },
+        {
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask        = depth_stages,
+            .srcAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstStageMask        = depth_stages,
+            .dstAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            .oldLayout           = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .newLayout           = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = this->depth_image,
+            .subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+        },
     };
     VkDependencyInfo dependency = {
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
+        .imageMemoryBarrierCount = 2,
         .pImageMemoryBarriers    = barriers,
     };
     vkCmdPipelineBarrier2(command_buffer, &dependency);
@@ -1469,12 +1542,20 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer, Native_Rend
         .loadOp      = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
     };
+    VkRenderingAttachmentInfo depth_attachment = {
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = this->depth_view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_NONE,
+    };
     VkRenderingInfo rendering = {
         .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea           = { { 0, 0 }, this->swapchain_extent },
         .layerCount           = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments    = &color_attachment,
+        .pDepthAttachment     = &depth_attachment,
     };
     vkCmdBeginRendering(command_buffer, &rendering);
 
@@ -1491,6 +1572,7 @@ void Native_Renderer::record_tonemap(VkCommandBuffer command_buffer, Native_Rend
     vkCmdPushConstants(command_buffer, this->tonemap_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
 
+    this->record_wire_draws(command_buffer, frame);
     this->record_ui_draws(command_buffer, frame);
 
     vkCmdEndRendering(command_buffer);
@@ -1528,6 +1610,23 @@ void Native_Renderer::record_ui_draws(VkCommandBuffer command_buffer, Native_Ren
         vkCmdPushConstants(command_buffer, this->ui_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
         vkCmdSetScissor(command_buffer, 0, 1, &draw.scissor);
+        vkCmdDrawIndexed(command_buffer, draw.index_count, 1, draw.first_index, 0, 0);
+    }
+}
+
+void Native_Renderer::record_wire_draws(VkCommandBuffer command_buffer, Native_Renderer_Frame &frame)
+{
+    if (this->wire_draws.empty()) return;
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->wire_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->wire_pipeline_layout,
+                            0, 1, &frame.descriptor_set, 0, nullptr);
+    for (const Wire_Draw &draw : this->wire_draws)
+    {
+        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &this->mesh_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
+        vkCmdBindIndexBuffer(command_buffer, this->mesh_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
+        vkCmdPushConstants(command_buffer, this->wire_pipeline_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.push), &draw.push);
         vkCmdDrawIndexed(command_buffer, draw.index_count, 1, draw.first_index, 0, 0);
     }
 }
@@ -1900,11 +1999,14 @@ bool Native_Renderer::create_device()
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(this->physical_device, &supported);
     this->depth_clamp = supported.depthClamp;
+    // Wireframes are triangles drawn as lines, which nearly every desktop device can.
+    this->wire_lines = supported.fillModeNonSolid;
+    if (!this->wire_lines) log_warn("The device can't draw triangles as lines: wireframes aren't drawn");
 
     VkPhysicalDeviceFeatures2 features = {
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext    = &features11,
-        .features = { .depthClamp = this->depth_clamp },
+        .features = { .depthClamp = this->depth_clamp, .fillModeNonSolid = this->wire_lines },
     };
 
     const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -2895,7 +2997,7 @@ bool Native_Renderer::create_pipelines()
         .vertex_input  = &no_vertex_input,
         .layout        = this->tonemap_pipeline_layout,
         .color_format  = this->surface_format.format,
-        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_format  = this->depth_format, // The scene's, for wireframes after it
         .depth_test    = false,
         .cull_mode     = VK_CULL_MODE_NONE,
     };
@@ -3082,7 +3184,7 @@ bool Native_Renderer::create_pipelines()
         .vertex_input  = &ui_vertex_input,
         .layout        = this->ui_pipeline_layout,
         .color_format  = this->surface_format.format,
-        .depth_format  = VK_FORMAT_UNDEFINED,
+        .depth_format  = this->depth_format, // In the tonemapping's rendering
         .depth_test    = false,
         .cull_mode     = VK_CULL_MODE_NONE,
         .blend         = Blend_Mode::Premultiplied,
@@ -3125,7 +3227,41 @@ bool Native_Renderer::create_pipelines()
         .shadow_caster = true,
         .view_mask     = (1u << SHADOW_CASCADES) - 1,
     };
-    return this->create_graphics_pipeline(shadow, &this->shadow_pipeline);
+    if (!this->create_graphics_pipeline(shadow, &this->shadow_pipeline)) return false;
+
+    // Wireframes over the tonemapped frame, in the swapchain, against the scene's depth:
+    // meshes' positions alone, through the frame's camera.
+    if (!this->wire_lines) return true;
+    VkPushConstantRange wire_push_constants = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(Wire_Push_Constants),
+    };
+    VkPipelineLayoutCreateInfo wire_layout_info = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &this->frame_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &wire_push_constants,
+    };
+    if (!vk_check(vkCreatePipelineLayout(this->device, &wire_layout_info, nullptr, &this->wire_pipeline_layout),
+                  "vkCreatePipelineLayout")) return false;
+
+    Pipeline_Description wire = {
+        .vertex_code   = wire_vert_spv,
+        .vertex_size   = sizeof(wire_vert_spv),
+        .fragment_code = wire_frag_spv,
+        .fragment_size = sizeof(wire_frag_spv),
+        .vertex_input  = &shadow_vertex_input,
+        .layout        = this->wire_pipeline_layout,
+        .color_format  = this->surface_format.format,
+        .depth_format  = this->depth_format,
+        .depth_test    = true,
+        .cull_mode     = VK_CULL_MODE_BACK_BIT,
+        .blend         = Blend_Mode::Premultiplied,
+        .wireframe     = true,
+    };
+    return this->create_graphics_pipeline(wire, &this->wire_pipeline);
 }
 
 bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &description, VkPipeline *pipeline)
@@ -3167,15 +3303,18 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         // Meshes are counter-clockwise from the front (see mesh.h); perspective()
         // flips Y, which keeps them counter-clockwise in Vulkan's framebuffer space.
         // Shadow casters' depth is pushed back more where it changes faster across
-        // a texel, so that sloped surfaces don't shadow themselves.
+        // a texel, so that sloped surfaces don't shadow themselves. Wireframes' is
+        // pulled forward, so that their lines aren't hidden by the triangles they're
+        // the edges of, whose depth is found at other points of the pixels.
         VkPipelineRasterizationStateCreateInfo rasterization = {
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable        = description.shadow_caster && this->depth_clamp,
-            .polygonMode             = VK_POLYGON_MODE_FILL,
+            .polygonMode             = description.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL,
             .cullMode                = description.cull_mode,
             .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .depthBiasEnable         = description.shadow_caster,
-            .depthBiasSlopeFactor    = description.shadow_caster ? 1.5f : 0.0f,
+            .depthBiasEnable         = description.shadow_caster || description.wireframe,
+            .depthBiasConstantFactor = description.wireframe ? -WIRE_DEPTH_BIAS : 0.0f,
+            .depthBiasSlopeFactor    = description.shadow_caster ? 1.5f : (description.wireframe ? -1.0f : 0.0f),
             .lineWidth               = 1.0f,
         };
         VkPipelineMultisampleStateCreateInfo multisample = {
@@ -3185,8 +3324,8 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         VkPipelineDepthStencilStateCreateInfo depth_stencil = {
             .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .depthTestEnable  = description.depth_test,
-            .depthWriteEnable = description.depth_test && description.blend == Blend_Mode::None,
-            .depthCompareOp   = VK_COMPARE_OP_LESS,
+            .depthWriteEnable = description.depth_test && description.blend == Blend_Mode::None && !description.wireframe,
+            .depthCompareOp   = description.wireframe ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS,
         };
         VkBlendFactor destination = description.blend == Blend_Mode::Additive ? VK_BLEND_FACTOR_ONE
                                                                               : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;

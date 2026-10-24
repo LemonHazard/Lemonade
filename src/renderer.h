@@ -35,6 +35,12 @@ public:
     // on its way to the GPU, like meshes.
     void draw_ui(const Ui_Mesh &mesh, u32 first_index, u32 index_count, const Texture &texture, const Vector4 &clip,
                  r32 scale);
+    // Draws the edges of index_count of the mesh's triangles from first_index on, those
+    // facing the camera, in `color` (see Render_Command_Draw_Wireframe) over the frame
+    // once it's tonemapped, under the UI, unlit and hidden behind the frame's meshes.
+    // Lines are a pixel wide. Nothing is drawn where the device can't draw lines of
+    // triangles (logged), or while the mesh is on its way to the GPU.
+    void draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Vector4 &color);
     // The texture's pixels changed: they're copied again before it's next drawn. Also
     // between frames, when begin_frame() returned false.
     void update_texture(const Texture &texture);

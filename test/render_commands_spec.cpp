@@ -84,3 +84,31 @@ TEST_CASE("push_texture_update records the texture", "[render_commands]")
     REQUIRE(command->texture.width == 2);
     REQUIRE(commands.used == command->header.size);
 }
+
+TEST_CASE("push_wireframe records the triangles to draw, all of them by default", "[render_commands]")
+{
+    alignas(std::max_align_t) u8 buffer[512];
+    Render_Commands commands = {};
+    commands.buffer   = buffer;
+    commands.capacity = sizeof(buffer);
+
+    Mesh_Vertex vertices[4] = {};
+    u32         indices[6]  = { 0, 1, 2, 0, 2, 3 };
+    Mesh        mesh        = { vertices, indices, 4, 6 };
+
+    push_wireframe(&commands, mesh, translation({ 1.0f, 2.0f, 3.0f }), { 1.0f, 0.5f, 0.0f, 1.0f });
+    push_wireframe(&commands, mesh, identity(), {}, 3, 3);
+
+    auto *all = (Render_Command_Draw_Wireframe *)buffer;
+    REQUIRE(all->header.type == Render_Command_Type::Draw_Wireframe);
+    REQUIRE(all->mesh.vertices == vertices);
+    REQUIRE(all->first_index == 0);
+    REQUIRE(all->index_count == 6);
+    REQUIRE(all->transform.at(1, 3) == 2.0f);
+    REQUIRE(all->color.g == 0.5f);
+
+    auto *second = (Render_Command_Draw_Wireframe *)(buffer + all->header.size);
+    REQUIRE(second->first_index == 3);
+    REQUIRE(second->index_count == 3);
+    REQUIRE(commands.used == all->header.size + second->header.size);
+}

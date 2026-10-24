@@ -146,6 +146,14 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             case Render_Command_Type::Update_Texture:
                 renderer.update_texture(((const Render_Command_Update_Texture *)header)->texture);
                 break;
+
+            case Render_Command_Type::Draw_Wireframe:
+            {
+                auto *command = (const Render_Command_Draw_Wireframe *)header;
+                renderer.draw_wireframe(command->mesh, command->first_index, command->index_count, command->transform,
+                                        command->color);
+                break;
+            }
         }
 
         if (header->size == 0)

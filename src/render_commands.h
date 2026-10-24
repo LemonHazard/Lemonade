@@ -21,6 +21,7 @@ enum class Render_Command_Type : u32
     Draw_Mesh,
     Draw_Ui,
     Update_Texture,
+    Draw_Wireframe,
 };
 
 // Every command starts with this header; `size` covers the header and the command's
@@ -42,6 +43,20 @@ struct Render_Command_Draw_Mesh
     u32      index_count;
     Matrix4  transform;   // Model to world
     Material material;    // Its textures are read then too
+};
+
+// The edges of a mesh's triangles that face the camera, drawn over the frame once it's
+// lit and tonemapped, under the UI: hidden where the frame's meshes are in front of
+// them, as an editor shows what it picked.
+struct Render_Command_Draw_Wireframe
+{
+    Render_Command_Header header;
+    // Read when the frame is drawn, like Draw_Mesh's (see mesh.h).
+    Mesh     mesh;
+    u32      first_index; // The triangles drawn: index_count of the mesh's indices from first_index
+    u32      index_count;
+    Matrix4  transform;   // Model to world
+    Vector4  color;       // sRGB-encoded like UI colors, alpha not premultiplied
 };
 
 // Drawn over the frame once it's lit and tonemapped, in the order they're pushed, with
@@ -145,6 +160,22 @@ inline void push_ui(Render_Commands *commands, const Ui_Mesh &mesh, const Textur
     command->texture     = texture;
     command->clip        = clip;
     command->scale       = scale;
+}
+
+// Draws the edges of the mesh's triangles from first_index on, index_count of them (all
+// by default).
+inline void push_wireframe(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
+                           u32 first_index = 0, u32 index_count = UINT32_MAX)
+{
+    auto *command = (Render_Command_Draw_Wireframe *)
+        push_render_command(commands, Render_Command_Type::Draw_Wireframe, sizeof(Render_Command_Draw_Wireframe));
+    if (!command) return;
+
+    command->mesh        = mesh;
+    command->first_index = first_index;
+    command->index_count = index_count == UINT32_MAX ? mesh.index_count - first_index : index_count;
+    command->transform   = transform;
+    command->color       = color;
 }
 
 inline void push_texture_update(Render_Commands *commands, const Texture &texture)

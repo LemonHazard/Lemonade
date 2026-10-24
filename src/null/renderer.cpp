@@ -38,6 +38,10 @@ void Renderer::draw_ui(const Ui_Mesh &, u32, u32, const Texture &, const Vector4
 {
 }
 
+void Renderer::draw_wireframe(const Mesh &, u32, u32, const Matrix4 &, const Vector4 &)
+{
+}
+
 void Renderer::update_texture(const Texture &)
 {
 }
