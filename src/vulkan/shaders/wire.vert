@@ -26,7 +26,10 @@ layout(set = 0, binding = 0) uniform Frame
 
 layout(location = 0) in vec3 in_position;
 
-// Where mesh.vert puts it, so that the depth it's tested against is the mesh's own.
+// Where mesh.vert puts it, to the bit, so that the depth the mesh left is equal to its own
+// where it's seen, and only there.
+invariant gl_Position;
+
 void main()
 {
     gl_Position = frame.view_projection * (push.model * vec4(in_position, 1.0));

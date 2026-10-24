@@ -45,9 +45,10 @@ struct Render_Command_Draw_Mesh
     Material material;    // Its textures are read then too
 };
 
-// The edges of a mesh's triangles that face the camera, drawn over the frame once it's
-// lit and tonemapped, under the UI: hidden where the frame's meshes are in front of
-// them, as an editor shows what it picked.
+// The edges of a mesh's triangles, drawn over the frame once it's lit and tonemapped,
+// under the UI, where the mesh is seen, as an editor shows what it picked. The mesh must
+// be drawn in the frame too, with the same transform: what's drawn is found by the
+// depth it left.
 struct Render_Command_Draw_Wireframe
 {
     Render_Command_Header header;

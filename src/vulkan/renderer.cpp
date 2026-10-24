@@ -115,10 +115,6 @@ constexpr u32 IRRADIANCE_SIZE      = 16;
 // The bloom is the frame blurred wide: its levels go from half the frame's size down
 // to this many, or to 8 pixels.
 constexpr u32 MAX_BLOOM_LEVELS     = 8;
-// Wireframes are drawn this much nearer than the depth they're tested against, in the
-// depth format's smallest steps (see depthBiasConstantFactor), on top of a pixel's
-// worth of the triangles' slope.
-constexpr r32 WIRE_DEPTH_BIAS      = 16.0f;
 // UI vertices and indices are copied to a buffer of this size each frame: past it, the
 // rest of the frame's UI isn't drawn.
 constexpr u64 UI_BUFFER_SIZE       = 8 * MiB;
@@ -348,7 +344,7 @@ struct Pipeline_Description
     bool       shadow_caster;  // Biases depth by its slope, and clamps it when the device can
     u32        view_mask;      // Of the views it draws, as layers of its attachments: 0 for just one
     Blend_Mode blend;          // When it's not None, depth isn't written
-    bool       wireframe;      // Draws triangles' edges, over the depth that's there: depth isn't written
+    bool       depth_equal;    // Draws only where the depth that's there is its own: it isn't written
 };
 
 class Native_Renderer
@@ -451,7 +447,7 @@ public:
     VkFormat                 shadow_format   = VK_FORMAT_UNDEFINED; // Depth that can be sampled too
     VkFilter                 shadow_filter   = VK_FILTER_NEAREST;   // Linear when shadow_format can be
     bool                     depth_clamp     = false;               // The device feature, enabled when there
-    bool                     wire_lines      = false;               // fillModeNonSolid, for wireframes: enabled when there
+    bool                     wire_barycentrics = false;             // fragmentShaderBarycentric, for wireframes: enabled when there
 
     VkSwapchainKHR swapchain        = VK_NULL_HANDLE;
     VkExtent2D     swapchain_extent = {};
@@ -506,7 +502,7 @@ public:
     VkPipelineLayout ui_pipeline_layout          = VK_NULL_HANDLE;
     VkPipeline       ui_pipeline                 = VK_NULL_HANDLE;
     VkPipelineLayout wire_pipeline_layout        = VK_NULL_HANDLE;
-    VkPipeline       wire_pipeline               = VK_NULL_HANDLE; // None without wire_lines
+    VkPipeline       wire_pipeline               = VK_NULL_HANDLE; // None without wire_barycentrics
     VkDescriptorPool ui_pool                     = VK_NULL_HANDLE; // A set for each texture UI draws use
     VkSampler        ui_sampler                  = VK_NULL_HANDLE; // Linear, clamped to the edges
 
@@ -1999,24 +1995,43 @@ bool Native_Renderer::create_device()
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(this->physical_device, &supported);
     this->depth_clamp = supported.depthClamp;
-    // Wireframes are triangles drawn as lines, which nearly every desktop device can.
-    this->wire_lines = supported.fillModeNonSolid;
-    if (!this->wire_lines) log_warn("The device can't draw triangles as lines: wireframes aren't drawn");
+    // Wireframes find triangles' edges by where fragments are in their triangles, which
+    // most desktop devices tell (the extension's feature).
+    VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR,
+    };
+    {
+        u32 extension_count = 0;
+        vkEnumerateDeviceExtensionProperties(this->physical_device, nullptr, &extension_count, nullptr);
+        std::vector<VkExtensionProperties> available(extension_count);
+        vkEnumerateDeviceExtensionProperties(this->physical_device, nullptr, &extension_count, available.data());
+        for (const auto &extension : available)
+        {
+            if (strcmp(extension.extensionName, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME) == 0)
+            {
+                VkPhysicalDeviceFeatures2 query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &barycentric };
+                vkGetPhysicalDeviceFeatures2(this->physical_device, &query);
+            }
+        }
+    }
+    this->wire_barycentrics = barycentric.fragmentShaderBarycentric;
+    if (!this->wire_barycentrics) log_warn("The device can't tell where fragments are in their triangles: wireframes aren't drawn");
+    barycentric.pNext = &features11;
 
     VkPhysicalDeviceFeatures2 features = {
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext    = &features11,
-        .features = { .depthClamp = this->depth_clamp, .fillModeNonSolid = this->wire_lines },
+        .pNext    = this->wire_barycentrics ? (void *)&barycentric : (void *)&features11,
+        .features = { .depthClamp = this->depth_clamp },
     };
 
-    const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME };
 
     VkDeviceCreateInfo info = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext                   = &features,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &queue_info,
-        .enabledExtensionCount   = 1,
+        .enabledExtensionCount   = this->wire_barycentrics ? 2u : 1u,
         .ppEnabledExtensionNames = extensions,
     };
     if (!vk_check(vkCreateDevice(this->physical_device, &info, nullptr, &this->device), "vkCreateDevice")) return false;
@@ -3229,9 +3244,9 @@ bool Native_Renderer::create_pipelines()
     };
     if (!this->create_graphics_pipeline(shadow, &this->shadow_pipeline)) return false;
 
-    // Wireframes over the tonemapped frame, in the swapchain, against the scene's depth:
-    // meshes' positions alone, through the frame's camera.
-    if (!this->wire_lines) return true;
+    // Wireframes over the tonemapped frame, in the swapchain, where the scene's depth is
+    // theirs: meshes' positions alone, through the frame's camera.
+    if (!this->wire_barycentrics) return true;
     VkPushConstantRange wire_push_constants = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
@@ -3259,7 +3274,7 @@ bool Native_Renderer::create_pipelines()
         .depth_test    = true,
         .cull_mode     = VK_CULL_MODE_BACK_BIT,
         .blend         = Blend_Mode::Premultiplied,
-        .wireframe     = true,
+        .depth_equal   = true,
     };
     return this->create_graphics_pipeline(wire, &this->wire_pipeline);
 }
@@ -3303,18 +3318,15 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         // Meshes are counter-clockwise from the front (see mesh.h); perspective()
         // flips Y, which keeps them counter-clockwise in Vulkan's framebuffer space.
         // Shadow casters' depth is pushed back more where it changes faster across
-        // a texel, so that sloped surfaces don't shadow themselves. Wireframes' is
-        // pulled forward, so that their lines aren't hidden by the triangles they're
-        // the edges of, whose depth is found at other points of the pixels.
+        // a texel, so that sloped surfaces don't shadow themselves.
         VkPipelineRasterizationStateCreateInfo rasterization = {
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable        = description.shadow_caster && this->depth_clamp,
-            .polygonMode             = description.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL,
+            .polygonMode             = VK_POLYGON_MODE_FILL,
             .cullMode                = description.cull_mode,
             .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .depthBiasEnable         = description.shadow_caster || description.wireframe,
-            .depthBiasConstantFactor = description.wireframe ? -WIRE_DEPTH_BIAS : 0.0f,
-            .depthBiasSlopeFactor    = description.shadow_caster ? 1.5f : (description.wireframe ? -1.0f : 0.0f),
+            .depthBiasEnable         = description.shadow_caster,
+            .depthBiasSlopeFactor    = description.shadow_caster ? 1.5f : 0.0f,
             .lineWidth               = 1.0f,
         };
         VkPipelineMultisampleStateCreateInfo multisample = {
@@ -3324,8 +3336,8 @@ bool Native_Renderer::create_graphics_pipeline(const Pipeline_Description &descr
         VkPipelineDepthStencilStateCreateInfo depth_stencil = {
             .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .depthTestEnable  = description.depth_test,
-            .depthWriteEnable = description.depth_test && description.blend == Blend_Mode::None && !description.wireframe,
-            .depthCompareOp   = description.wireframe ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS,
+            .depthWriteEnable = description.depth_test && description.blend == Blend_Mode::None && !description.depth_equal,
+            .depthCompareOp   = description.depth_equal ? VK_COMPARE_OP_EQUAL : VK_COMPARE_OP_LESS,
         };
         VkBlendFactor destination = description.blend == Blend_Mode::Additive ? VK_BLEND_FACTOR_ONE
                                                                               : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
