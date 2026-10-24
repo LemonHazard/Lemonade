@@ -136,9 +136,9 @@ void edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
     Entity &entity = *picked;
 
     u32 model = level_model(*level, entity.model);
-    if (ImGui::BeginCombo("Model", model < level->model_count ? level->models[model].name : "none"))
+    if (ImGui::BeginCombo("Model", model < level->model_count ? level->models[model].name : "[none]"))
     {
-        if (ImGui::Selectable("none", model == level->model_count)) entity.model = NO_MODEL;
+        if (ImGui::Selectable("[none]", model == level->model_count)) entity.model = NO_MODEL;
         for (u32 i = 0; i < level->model_count; ++i)
             if (ImGui::Selectable(level->models[i].name, i == model)) entity.model = level->models[i].model;
         ImGui::EndCombo();
