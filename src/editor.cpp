@@ -373,7 +373,7 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
 constexpr r64 PICKED_SHADE_SECONDS  = 0.5;
 constexpr r64 PICKED_VIOLET_SECONDS = 1.0;
 
-// Its color `time` seconds into the play, sRGB-encoded.
+// Its color `time` seconds into the editor's being open, sRGB-encoded.
 static Vector4 picked_color(r64 time)
 {
     const Vector3 violet = { 0.6f, 0.2f, 1.0f };
@@ -460,7 +460,7 @@ static void place_in_view(World *world, Game_Frame *frame, Vector3 from, Vector3
 
     const Model &model = world->assets.models.models[placed.model];
     push_model(frame->render, model, entity_transform(placed));
-    push_wireframe(frame->render, model.mesh, entity_transform(placed), picked_color(world->play_time));
+    push_wireframe(frame->render, model.mesh, entity_transform(placed), picked_color(world->editor_time));
 
     if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
 
@@ -494,7 +494,7 @@ void edit_in_view(World *world, Game_Frame *frame)
     const Entity *picked = entity_with_id(level, world->selected);
     if (picked && picked->model != NO_MODEL)
         push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
-                       picked_color(world->play_time));
+                       picked_color(world->editor_time));
 }
 
 bool palette_shown(const World &world)
@@ -621,5 +621,5 @@ void view_palette(World *world, Game_Frame *frame)
     const Entity *picked = entity_with_id(palette.level, palette.selected);
     if (picked && picked->model != NO_MODEL)
         push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
-                       picked_color(world->play_time));
+                       picked_color(world->editor_time));
 }

@@ -43,3 +43,26 @@ TEST_CASE("begin_world_frame counts the play time and the frames in each second"
 
     std::free(memory.permanent);
 }
+
+TEST_CASE("begin_world_frame stops the play time while the editor's open, counting the editor's", "[world]")
+{
+    Game_Memory memory = {};
+    memory.permanent_size = sizeof(World);
+    memory.permanent      = std::calloc(1, memory.permanent_size);
+    World *world = game_world(&memory);
+
+    Game_Frame frame = {};
+    frame.dt = 0.25f;
+    begin_world_frame(world, &frame);
+    world->editing = true;
+    begin_world_frame(world, &frame);
+    begin_world_frame(world, &frame);
+    REQUIRE(world->play_time == 0.25);
+    REQUIRE(world->editor_time == 0.5);
+
+    // Frames are counted all the same.
+    begin_world_frame(world, &frame);
+    REQUIRE(world->fps == 4);
+
+    std::free(memory.permanent);
+}

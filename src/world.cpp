@@ -15,7 +15,10 @@ World *game_world(Game_Memory *memory)
 
 void begin_world_frame(World *world, const Game_Frame *frame)
 {
-    world->play_time     += frame->dt;
+    if (world->editing)
+        world->editor_time += frame->dt;
+    else
+        world->play_time += frame->dt;
     world->second_frames += 1;
     world->second_time   += frame->dt;
     if (world->second_time >= 1.0f)
