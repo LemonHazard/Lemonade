@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 struct Vector2 {
     union {
         struct {
@@ -91,3 +93,24 @@ struct Rotation3 {
         return &pitch;
     }
 };
+
+inline Vector3 operator+(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+inline Vector3 operator-(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+inline Vector3 operator*(Vector3 v, float s)   { return { v.x * s, v.y * s, v.z * s }; }
+inline Vector3 &operator+=(Vector3 &a, Vector3 b) { a = a + b; return a; }
+inline Vector3 &operator-=(Vector3 &a, Vector3 b) { a = a - b; return a; }
+
+inline float dot(Vector3 a, Vector3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline float length(Vector3 v)         { return std::sqrt(dot(v, v)); }
+
+inline Vector3 cross(Vector3 a, Vector3 b)
+{
+    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+
+// Returns zero for a zero vector.
+inline Vector3 normalize(Vector3 v)
+{
+    float len = length(v);
+    return len > 0.0f ? v * (1.0f / len) : v;
+}
