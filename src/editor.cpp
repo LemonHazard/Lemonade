@@ -213,15 +213,9 @@ static void open_palette(World *world, const Game_Definition &game, Render_Comma
         return;
     }
 
-    Vector3 focus    = palette.focus;
-    r32     yaw      = palette.yaw;
-    r32     pitch    = palette.pitch;
-    r32     distance = palette.distance;
+    Orbit_Camera camera = palette.camera;
     show_palette_models(world, shown->files, game.palette_ground, commands);
-    palette.focus    = focus;
-    palette.yaw      = yaw;
-    palette.pitch    = pitch;
-    palette.distance = distance;
+    palette.camera = camera;
 }
 
 // Back to the editor, placing the model picked in the palette, if one is: the rest of
@@ -347,6 +341,11 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
         if (ImGui::Button("Palette")) open_palette(world, game, frame->render);
         ImGui::EndDisabled();
 
+        ImGui::TextDisabled("WASD moves, the arrows turn and zoom");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Game's view")) world->camera.distance = 0.0f; // See view_editor()
+        ImGui::TextDisabled("Right-drag turns too, and the wheel zooms");
+
         if (world->placing)
         {
             std::string_view name = file_stem(world->assets.models.paths[world->placed]);
@@ -439,6 +438,14 @@ static bool point_on_level(const World &world, Vector3 from, Vector3 along, Vect
     return true;
 }
 
+// The right button let go of where it was pressed, not dragged to turn the camera.
+static bool right_clicked()
+{
+    ImGuiIO &io = ImGui::GetIO();
+    return ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+           io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] < io.MouseDragThreshold * io.MouseDragThreshold;
+}
+
 // The model from the palette, where the pointer is on the level, and put there on a click.
 static void place_in_view(World *world, Game_Frame *frame, Vector3 from, Vector3 along)
 {
@@ -479,7 +486,7 @@ void edit_in_view(World *world, Game_Frame *frame)
     if (world->placing)
     {
         if (on_level) place_in_view(world, frame, from, along);
-        if (on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) world->placing = false;
+        if (on_level && right_clicked()) world->placing = false;
     }
     else if (on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         world->selected = entity_on_ray(level, world->assets, from, along);
@@ -495,48 +502,46 @@ bool palette_shown(const World &world)
     return world.editing && world.palette.open;
 }
 
-// The palette's camera turns this many degrees for each pixel the pointer is dragged,
-// comes this much closer for each notch of the wheel, and moves this many times as far
-// as it is from what it looks at each second. With the arrow keys, it turns this many
-// degrees a second, and comes closer or goes further by this much of how far it is.
-constexpr r32 PALETTE_TURN_SPEED     = 0.3f;
-constexpr r32 PALETTE_ZOOM_STEP      = 0.85f;
-constexpr r32 PALETTE_MOVE_SPEED     = 0.75f;
-constexpr r32 PALETTE_KEY_TURN_SPEED = 90.0f;
-constexpr r32 PALETTE_KEY_ZOOM_SPEED = 1.5f;
+// The editor's cameras turn this many degrees for each pixel the pointer is dragged,
+// come this much closer for each notch of the wheel, and move this many times as far as
+// they are from what they look at each second. With the arrow keys, they turn this many
+// degrees a second, and come closer or go further by this much of how far they are.
+constexpr r32 EDITOR_CAMERA_TURN_SPEED     = 0.3f;
+constexpr r32 EDITOR_CAMERA_ZOOM_STEP      = 0.85f;
+constexpr r32 EDITOR_CAMERA_MOVE_SPEED     = 0.75f;
+constexpr r32 EDITOR_CAMERA_KEY_TURN_SPEED = 90.0f;
+constexpr r32 EDITOR_CAMERA_KEY_ZOOM_SPEED = 1.5f;
 
-void view_palette(World *world, Game_Frame *frame)
+// Moves the camera as the pointer and the keys say, those ImGui doesn't have, and sets
+// the frame's camera to it: see view_palette() in editor.h.
+static void fly_camera(Orbit_Camera *camera, Game_Frame *frame)
 {
-    ImGui::SetCurrentContext(frame->imgui);
-    ImGuiIO &io      = ImGui::GetIO();
-    Palette &palette = world->palette;
-    palette.level.lighting = world->level.lighting;
-
+    ImGuiIO &io = ImGui::GetIO();
     if (!io.WantCaptureMouse)
     {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
         {
-            palette.yaw  -= io.MouseDelta.x * PALETTE_TURN_SPEED;
-            palette.pitch = clamp(palette.pitch + io.MouseDelta.y * PALETTE_TURN_SPEED, -30.0f, 89.0f);
+            camera->yaw  -= io.MouseDelta.x * EDITOR_CAMERA_TURN_SPEED;
+            camera->pitch = clamp(camera->pitch + io.MouseDelta.y * EDITOR_CAMERA_TURN_SPEED, -30.0f, 89.0f);
         }
-        palette.distance *= std::pow(PALETTE_ZOOM_STEP, io.MouseWheel);
+        camera->distance *= std::pow(EDITOR_CAMERA_ZOOM_STEP, io.MouseWheel);
     }
 
     // As the follow camera's keys: up and down arrows bring it closer and further, left
     // and right turn it clockwise and counter-clockwise around what it looks at.
     if (!io.WantCaptureKeyboard)
     {
-        r32 zoom = std::exp(PALETTE_KEY_ZOOM_SPEED * frame->dt);
-        if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    palette.distance /= zoom;
-        if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  palette.distance *= zoom;
-        if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  palette.yaw -= PALETTE_KEY_TURN_SPEED * frame->dt;
-        if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) palette.yaw += PALETTE_KEY_TURN_SPEED * frame->dt;
+        r32 zoom = std::exp(EDITOR_CAMERA_KEY_ZOOM_SPEED * frame->dt);
+        if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    camera->distance /= zoom;
+        if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  camera->distance *= zoom;
+        if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  camera->yaw -= EDITOR_CAMERA_KEY_TURN_SPEED * frame->dt;
+        if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) camera->yaw += EDITOR_CAMERA_KEY_TURN_SPEED * frame->dt;
     }
-    palette.yaw      = std::remainder(palette.yaw, 360.0f);
-    palette.distance = clamp(palette.distance, 0.25f, 2000.0f);
+    camera->yaw      = std::remainder(camera->yaw, 360.0f);
+    camera->distance = clamp(camera->distance, 0.25f, 2000.0f);
 
-    r32     yaw     = radians(palette.yaw);
-    r32     pitch   = radians(palette.pitch);
+    r32     yaw     = radians(camera->yaw);
+    r32     pitch   = radians(camera->pitch);
     Vector3 forward = { -std::sin(yaw), 0.0f, -std::cos(yaw) };
     Vector3 right   = { std::cos(yaw), 0.0f, -std::sin(yaw) };
     if (!io.WantCaptureKeyboard)
@@ -546,19 +551,60 @@ void view_palette(World *world, Game_Frame *frame)
         if (ImGui::IsKeyDown(ImGuiKey_S)) move -= forward;
         if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
         if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
-        palette.focus += normalize(move) * (palette.distance * PALETTE_MOVE_SPEED * frame->dt);
+        camera->focus += normalize(move) * (camera->distance * EDITOR_CAMERA_MOVE_SPEED * frame->dt);
     }
 
     // Its near and far planes go with how far it is, so what's small is seen up close
     // and what's big from far away.
     Vector3 behind = { std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch) };
-    Vector3 eye    = palette.focus + behind * palette.distance;
+    Vector3 eye    = camera->focus + behind * camera->distance;
     r32     aspect = frame->height ? (r32)frame->width / (r32)frame->height : 1.0f;
-    r32     z_near = std::max(0.01f * palette.distance, 0.02f);
-    r32     z_far  = std::max(8.0f * palette.distance, 150.0f);
-    frame->render->view_projection = perspective(radians(PALETTE_FIELD_OF_VIEW), aspect, z_near, z_far) *
-                                     look_at(eye, palette.focus, { 0.0f, 1.0f, 0.0f });
+    r32     z_near = std::max(0.01f * camera->distance, 0.02f);
+    r32     z_far  = std::max(8.0f * camera->distance, 150.0f);
+    frame->render->view_projection = perspective(radians(ORBIT_CAMERA_FIELD_OF_VIEW), aspect, z_near, z_far) *
+                                     look_at(eye, camera->focus, { 0.0f, 1.0f, 0.0f });
     frame->render->camera_position = eye;
+}
+
+// The editor's camera where the game's last was, looking at what's in the middle of its
+// view, on the level's models or the ground's plane, or 10 m ahead when it meets neither.
+// Before the game's camera has seen the level, it looks down at the origin.
+static void look_from_game_camera(World *world)
+{
+    Orbit_Camera &camera        = world->camera;
+    Matrix4       clip_to_world = inverse(world->game_view_projection);
+    Vector4       near_point    = clip_to_world * Vector4{ 0.0f, 0.0f, 0.0f, 1.0f };
+    Vector4       far_point     = clip_to_world * Vector4{ 0.0f, 0.0f, 1.0f, 1.0f };
+    Vector3       eye           = world->game_camera_position;
+    Vector3       along         = far_point.xyz * (1.0f / far_point.w) - near_point.xyz * (1.0f / near_point.w);
+    Vector3       forward       = normalize(along);
+    if (near_point.w == 0.0f || far_point.w == 0.0f || !(length(forward) > 0.0f))
+    {
+        camera = { { 0.0f, 0.0f, 0.0f }, 0.0f, 35.0f, 20.0f };
+        return;
+    }
+
+    Vector3 focus;
+    if (!point_on_level(*world, eye, along, &focus)) focus = eye + forward * 10.0f;
+    camera.focus    = focus;
+    camera.distance = length(focus - eye);
+    camera.yaw      = std::atan2(-forward.x, -forward.z) * (180.0f / PI);
+    camera.pitch    = std::asin(clamp(-forward.y, -1.0f, 1.0f)) * (180.0f / PI);
+}
+
+void view_editor(World *world, Game_Frame *frame)
+{
+    ImGui::SetCurrentContext(frame->imgui);
+    if (world->camera.distance <= 0.0f) look_from_game_camera(world);
+    fly_camera(&world->camera, frame);
+}
+
+void view_palette(World *world, Game_Frame *frame)
+{
+    ImGui::SetCurrentContext(frame->imgui);
+    Palette &palette = world->palette;
+    palette.level.lighting = world->level.lighting;
+    fly_camera(&palette.camera, frame);
 
     Vector3 from, along;
     if (ray_under_mouse(frame->render->view_projection, &from, &along))

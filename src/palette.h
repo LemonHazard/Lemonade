@@ -1,6 +1,7 @@
 #pragma once
 
 #include "level.h"
+#include "orbit_camera.h"
 
 struct Render_Commands;
 struct World;
@@ -15,9 +16,6 @@ struct World;
 
 // A group has this many models at most: a bigger one is split.
 constexpr u32 PALETTE_GROUP_SIZE = 64;
-
-// The palette's camera sees this many degrees up and down.
-constexpr r32 PALETTE_FIELD_OF_VIEW = 50.0f;
 
 // Models in a folder that have the same category, as Synty's POLYGON models name it:
 // their names are kind_Category_..., "Wep" for SM_Wep_Sword_01 and "Hair" for
@@ -45,20 +43,14 @@ std::string_view palette_category(std::string_view name);
 // What the palette shows, kept in the world (see world.h) while the editor's open.
 struct Palette
 {
-    bool        open;                   // Its window is open, and the world shows its level instead of the game's
-    Level       level;                  // The group's models, on the ground
-    char        group[LEVEL_PATH_SIZE]; // Its folder and name: none before one is shown
-    bool        loaded;                 // The assets past `mark` are the level's, loaded for it
-    Assets_Mark mark;
-    u32     ground;                 // The id of the ground's entity in the level: NO_ID when it has none
-    u32     selected;               // The id of the model picked in it
-
-    // Its camera turns `yaw` degrees around `focus` (0 looks down -Z), `pitch` degrees
-    // above it, from `distance` away.
-    Vector3 focus;
-    r32     yaw;
-    r32     pitch;
-    r32     distance;
+    bool         open;                   // Its window is open, and the world shows its level instead of the game's
+    Level        level;                  // The group's models, on the ground
+    char         group[LEVEL_PATH_SIZE]; // Its folder and name: none before one is shown
+    bool         loaded;                 // The assets past `mark` are the level's, loaded for it
+    Assets_Mark  mark;
+    u32          ground;                 // The id of the ground's entity in the level: NO_ID when it has none
+    u32          selected;               // The id of the model picked in it
+    Orbit_Camera camera;                 // Looks at all of the group's models when it's shown
 };
 
 // Makes the world's palette's level the models in `files`, on the model in `ground`

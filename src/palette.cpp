@@ -93,7 +93,7 @@ static r32 palette_distance(r32 pitch, Vector3 half)
 {
     constexpr r32 seen = 0.9f; // Of the view, from its middle to its edges
 
-    Matrix4 projection = perspective(radians(PALETTE_FIELD_OF_VIEW), 16.0f / 9.0f, 0.01f, 10000.0f);
+    Matrix4 projection = perspective(radians(ORBIT_CAMERA_FIELD_OF_VIEW), 16.0f / 9.0f, 0.01f, 10000.0f);
     Vector3 behind     = { 0.0f, std::sin(radians(pitch)), std::cos(radians(pitch)) };
     auto    fits       = [&](r32 distance)
     {
@@ -272,8 +272,5 @@ void show_palette_models(World *world, std::span<const str> files, const char *g
     // Close enough that what's in the rows fills the view, at 16:9, without any of it
     // going past its edges.
     Vector3 half = { 0.5f * width, tallest, 0.5f * depth };
-    palette->focus    = { 0.0f, 0.0f, 0.0f };
-    palette->yaw      = 0.0f;
-    palette->pitch    = PALETTE_PITCH;
-    palette->distance = palette_distance(palette->pitch, half);
+    palette->camera = { { 0.0f, 0.0f, 0.0f }, 0.0f, PALETTE_PITCH, palette_distance(PALETTE_PITCH, half) };
 }

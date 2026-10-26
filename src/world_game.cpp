@@ -28,9 +28,10 @@ void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &ga
     if (frame->input->was_pressed("Quit"))
         frame->quit = true;
 
-    // The game's level waits while the palette's is shown. They share models, each with
-    // its own emission for them.
-    if (palette_shown(*world)) view_palette(world, frame); // May go back to the game's
+    // The game waits while the editor's open: its scripts aren't run, and the editor
+    // sees its level through its own camera, or the palette's level through the
+    // palette's. They share models, each level with its own emission for them.
+    if (palette_shown(*world)) view_palette(world, frame); // May go back to the editor's view
     if (palette_shown(*world))
     {
         Level &palette = world->palette.level;
@@ -41,16 +42,25 @@ void run_world(Game_Memory *memory, Game_Frame *frame, const Game_Definition &ga
     }
     scale_level_emission(level, &world->assets);
 
-    // Scripts may add or remove entities as they run: each pass takes them as they are.
-    for (u32 i = 0; i < level.entity_count; ++i)
+    if (world->editing)
+        view_editor(world, frame);
+    else
     {
-        const Script_Info *script = script_info(game.scripts, level.entities[i].script);
-        if (script && script->update) script->update(world, &level.entities[i], frame);
-    }
-    for (u32 i = 0; i < level.entity_count; ++i)
-    {
-        const Script_Info *script = script_info(game.scripts, level.entities[i].script);
-        if (script && script->late_update) script->late_update(world, &level.entities[i], frame);
+        // Scripts may add or remove entities as they run: each pass takes them as they are.
+        for (u32 i = 0; i < level.entity_count; ++i)
+        {
+            const Script_Info *script = script_info(game.scripts, level.entities[i].script);
+            if (script && script->update) script->update(world, &level.entities[i], frame);
+        }
+        for (u32 i = 0; i < level.entity_count; ++i)
+        {
+            const Script_Info *script = script_info(game.scripts, level.entities[i].script);
+            if (script && script->late_update) script->late_update(world, &level.entities[i], frame);
+        }
+
+        // For the editor to start where the game's camera is.
+        world->game_view_projection = frame->render->view_projection;
+        world->game_camera_position = frame->render->camera_position;
     }
 
     edit_in_view(world, frame);

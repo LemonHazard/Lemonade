@@ -2,6 +2,8 @@
 
 #include "core.h"
 #include "level.h"
+#include "matrix.h"
+#include "orbit_camera.h"
 #include "palette.h"
 
 struct Game_Frame;
@@ -23,8 +25,15 @@ struct World
     Level_Assets assets;
     Level        level;
 
-    bool         editing;  // The editor's window is open, over the game
+    bool         editing;  // The editor's window is open, over the game, which waits
     u32          selected; // The id of the entity the editor shows
+
+    // The editor sees the game's level through its own camera, put where the game's
+    // last was while its distance is 0 (see view_editor()).
+    Orbit_Camera camera;
+    Matrix4      game_view_projection; // The game's camera, as it last saw the level
+    Vector3      game_camera_position;
+
     Palette      palette;  // The editor's models to place, and what it shows of them
     bool         placing;  // A click on the level places a `placed` there (see edit_in_view())
     u32          placed;   // The model, into Level_Assets::models
