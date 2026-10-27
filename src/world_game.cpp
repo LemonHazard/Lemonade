@@ -24,7 +24,7 @@ static void show_stats(const World &world)
         ImGui::Text("%.1f min, %.1f avg, %.1f max ms a frame", world.frame_min * 1000.0f,
                     world.frame_avg * 1000.0f, world.frame_max * 1000.0f);
         ImGui::Text("%u fps", world.fps);
-        ImGui::Text("%.0f s of play", world.play_time);
+        ImGui::Text("%.0f s of play%s", world.play_time, world.editing ? " (paused)" : "");
     }
     ImGui::End();
 }
