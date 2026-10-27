@@ -16,7 +16,6 @@ static void show_stats(const World &world)
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
     ImVec2 corner = { viewport->WorkPos.x + viewport->WorkSize.x - 16.0f, viewport->WorkPos.y + 16.0f };
     ImGui::SetNextWindowPos(corner, ImGuiCond_Always, { 1.0f, 0.0f });
-    ImGui::SetNextWindowBgAlpha(0.35f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
@@ -24,7 +23,8 @@ static void show_stats(const World &world)
     {
         ImGui::Text("%.1f min, %.1f avg, %.1f max ms a frame", world.frame_min * 1000.0f,
                     world.frame_avg * 1000.0f, world.frame_max * 1000.0f);
-        ImGui::Text("%u fps, %.0f s of play", world.fps, world.play_time);
+        ImGui::Text("%u fps", world.fps);
+        ImGui::Text("%.0f s of play", world.play_time);
     }
     ImGui::End();
 }
