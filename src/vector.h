@@ -94,6 +94,17 @@ struct Rotation3 {
     }
 };
 
+inline Vector2 operator+(Vector2 a, Vector2 b) { return { a.x + b.x, a.y + b.y }; }
+inline Vector2 operator-(Vector2 a, Vector2 b) { return { a.x - b.x, a.y - b.y }; }
+inline Vector2 operator*(Vector2 v, float s)   { return { v.x * s, v.y * s }; }
+
+inline float dot(Vector2 a, Vector2 b) { return a.x * b.x + a.y * b.y; }
+inline float length(Vector2 v)         { return std::sqrt(dot(v, v)); }
+
+// The z of the 3D cross product: positive when `b` turns counter-clockwise from `a`
+// with y up, clockwise with y down.
+inline float cross(Vector2 a, Vector2 b) { return a.x * b.y - a.y * b.x; }
+
 inline Vector3 operator+(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
 inline Vector3 operator-(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
 inline Vector3 operator*(Vector3 v, float s)   { return { v.x * s, v.y * s, v.z * s }; }
@@ -108,7 +119,13 @@ inline Vector3 cross(Vector3 a, Vector3 b)
     return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
 }
 
-// Returns zero for a zero vector.
+// Return zero for a zero vector.
+inline Vector2 normalize(Vector2 v)
+{
+    float len = length(v);
+    return len > 0.0f ? v * (1.0f / len) : v;
+}
+
 inline Vector3 normalize(Vector3 v)
 {
     float len = length(v);
