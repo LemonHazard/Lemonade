@@ -1,6 +1,7 @@
 #include "editor.h"
 #include "file.h"
 #include "game.h"
+#include "gizmo.h"
 #include "logger.h"
 #include "world.h"
 #include "world_game.h"
@@ -343,6 +344,7 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
         ImGui::SameLine();
         if (ImGui::SmallButton("Game's view")) world->camera.distance = 0.0f; // See view_editor()
         ImGui::TextDisabled("Right-drag turns too, and the wheel zooms");
+        ImGui::TextDisabled("Drag the gizmo to move, with Ctrl to snap");
 
         if (world->placing)
         {
@@ -481,13 +483,21 @@ void edit_in_view(World *world, Game_Frame *frame)
     Vector3 from, along;
     bool    on_level = ray_under_mouse(frame->render->view_projection, &from, &along);
 
+    Entity *selected = entity_with_id(&level, world->selected);
+    if (world->placing || !selected) world->gizmo.axes = 0;
+
     if (world->placing)
     {
         if (on_level) place_in_view(world, frame, from, along);
         if (on_level && right_clicked()) world->placing = false;
     }
-    else if (on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        world->selected = entity_on_ray(level, world->assets, from, along);
+    else
+    {
+        bool on_gizmo =
+            selected && move_with_gizmo(&world->gizmo, &selected->position, *frame->render, on_level, from, along);
+        if (!on_gizmo && on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            world->selected = entity_on_ray(level, world->assets, from, along);
+    }
 
     const Entity *picked = entity_with_id(level, world->selected);
     if (picked && picked->model != NO_MODEL)

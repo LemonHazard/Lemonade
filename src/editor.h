@@ -33,6 +33,9 @@ void view_editor(World *world, Game_Frame *frame);
 // windows, picks the entity under it, or none, and the picked one's model is drawn over
 // the level as a wireframe of what the camera sees of it.
 //
+// The picked one, model or not, has a gizmo at its position to drag it with (see
+// gizmo.h): a click on it doesn't pick.
+//
 // While the editor places a model from the palette, it's drawn where the pointer is on
 // the level instead, standing on its models or the ground's plane (y = 0): a click puts
 // it there as a new entity and picks it, and stops placing unless Shift is down, and a

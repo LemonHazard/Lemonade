@@ -9,6 +9,14 @@
 struct Game_Frame;
 struct Game_Memory;
 
+// A drag of the editor's gizmo (see gizmo.h), kept from frame to frame.
+struct Gizmo_Drag
+{
+    u32     axes;    // Moved along: bits 1, 2 and 4 for x, y and z, two for a plane, none while it isn't dragged
+    Vector3 from;    // Where it was when the drag started
+    Vector3 grabbed; // The point on the gizmo the drag started from
+};
+
 // What a game made of levels keeps: the level it's in, the models and textures loaded
 // for it, how long it's been played (not while the editor's open: the game waits then),
 // the frames' times for the stats overlay, and the editor's state. Everything else that's the game's is its entities' script
@@ -36,6 +44,7 @@ struct World
 
     bool         editing;  // The editor's window is open, over the game, which waits
     u32          selected; // The id of the entity the editor shows
+    Gizmo_Drag   gizmo;    // Moves the selected one (see edit_in_view())
 
     // The editor sees the game's level through its own camera, put where the game's
     // last was while its distance is 0 (see view_editor()).
