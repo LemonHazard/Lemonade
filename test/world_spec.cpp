@@ -44,6 +44,37 @@ TEST_CASE("begin_world_frame counts the play time and the frames in each second"
     std::free(memory.permanent);
 }
 
+TEST_CASE("begin_world_frame keeps the shortest, average and longest frames of the last second", "[world]")
+{
+    Game_Memory memory = {};
+    memory.permanent_size = sizeof(World);
+    memory.permanent      = std::calloc(1, memory.permanent_size);
+    World *world = game_world(&memory);
+
+    Game_Frame frame = {};
+    const r32 seconds[] = { 0.25f, 0.125f, 0.5f, 0.125f };
+    for (r32 dt : seconds)
+    {
+        frame.dt = dt;
+        begin_world_frame(world, &frame);
+    }
+    REQUIRE(world->fps == 4);
+    REQUIRE(world->frame_min == 0.125f);
+    REQUIRE(world->frame_avg == 0.25f);
+    REQUIRE(world->frame_max == 0.5f);
+
+    // The next second's are its own.
+    frame.dt = 0.5f;
+    begin_world_frame(world, &frame);
+    begin_world_frame(world, &frame);
+    REQUIRE(world->fps == 2);
+    REQUIRE(world->frame_min == 0.5f);
+    REQUIRE(world->frame_avg == 0.5f);
+    REQUIRE(world->frame_max == 0.5f);
+
+    std::free(memory.permanent);
+}
+
 TEST_CASE("begin_world_frame stops the play time while the editor's open, counting the editor's", "[world]")
 {
     Game_Memory memory = {};

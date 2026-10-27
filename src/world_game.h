@@ -18,9 +18,11 @@ struct Game_Definition
 };
 
 // One frame of the world, in the game's memory: loads the first level when the game
-// starts, opens the editor on the "Editor" key (see editor.h) and quits on "Quit",
-// runs the entities' scripts' updates, then their late updates, and draws the level, as
-// the camera they set sees it, with the sky behind it. While the editor's open, the game
+// starts, opens the editor on the "Editor" key (see editor.h), shows and hides the stats
+// overlay on "Stats" (the frames' shortest, average and longest times in the last
+// second, the frames a second and the play time) and quits on "Quit", runs the
+// entities' scripts' updates, then their late updates, and draws the level, as the
+// camera they set sees it, with the sky behind it. While the editor's open, the game
 // waits, its scripts not run and its play time stopped: the level is drawn through the
 // editor's camera, which picks entities in it, or, while the editor shows its palette,
 // the palette's level is drawn instead, through the palette's camera.

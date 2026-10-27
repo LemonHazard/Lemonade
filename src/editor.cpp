@@ -326,8 +326,6 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
     ImGui::SetNextWindowSize({ 360.0f, 0.0f }, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Editor", &world->editing))
     {
-        ImGui::Text("%.1f ms a frame, %u fps, %.0f s of play", frame->dt * 1000.0f, world->fps, world->play_time);
-
         // Reload starts the level again as the file is, losing what's changed here. Save
         // writes what's changed here to the file, with the entities where they are now.
         Level &level = world->level;

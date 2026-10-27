@@ -11,7 +11,7 @@ struct Game_Memory;
 
 // What a game made of levels keeps: the level it's in, the models and textures loaded
 // for it, how long it's been played (not while the editor's open: the game waits then),
-// and the editor's state. Everything else that's the game's is its entities' script
+// the frames' times for the stats overlay, and the editor's state. Everything else that's the game's is its entities' script
 // data. It's the start of the game's permanent memory, where it outlives reloads of the
 // game's code (see game.h), and the models' storage follows it.
 struct World
@@ -19,9 +19,17 @@ struct World
     bool         initialized;   // The first level is loaded (see run_world())
     r64          play_time;     // Seconds, the editor's open ones left out
     r64          editor_time;   // Seconds the editor's been open, which its wireframes breathe by
-    u32          fps;           // Frames in the last whole second, editing or not
-    u32          second_frames; // Frames so far in this second
-    r32          second_time;   // Seconds so far in this second
+
+    // The frames of the last whole second, editing or not, and of this one so far.
+    u32          fps;
+    r32          frame_min;     // Seconds, the shortest, the average and the longest
+    r32          frame_avg;
+    r32          frame_max;
+    u32          second_frames;
+    r32          second_time;
+    r32          second_min;
+    r32          second_max;
+    bool         stats_shown;   // The overlay shows them (see run_world())
 
     Level_Assets assets;
     Level        level;
@@ -44,6 +52,6 @@ struct World
 // models' storage.
 World *game_world(Game_Memory *memory);
 
-// Counts the frame's time into the play time, or the editor's while it's open, and the
-// frames a second.
+// Counts the frame's time into the play time, or the editor's while it's open, and into
+// the frames a second, with their shortest, average and longest times.
 void begin_world_frame(World *world, const Game_Frame *frame);

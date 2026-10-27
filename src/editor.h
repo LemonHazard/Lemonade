@@ -10,10 +10,9 @@ struct World;
 
 // Makes the frame's ImGui context current (see imgui_host.h) and keeps the keys from
 // the game while the editor's text fields have them; the "Editor" key opens and closes
-// the window, which shows the frame's time, the level's file with buttons to load it
-// again, save it and open the palette, how its camera moves with a button that puts it
-// where the game's is, the model it places, and the level's entities and lighting, as
-// below.
+// the window, which shows the level's file with buttons to load it again, save it and
+// open the palette, how its camera moves with a button that puts it where the game's
+// is, the model it places, and the level's entities and lighting, as below.
 //
 // The palette (see palette.h) takes the window's place while it's open: its window has
 // a header for each of the game's model folders, with a button for each group of models
