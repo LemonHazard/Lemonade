@@ -210,10 +210,12 @@ void load_level(Level *level, Level_Assets *assets, const char *path, std::span<
         entity.id = id_from_json(item["id"]);
         if (entity.id == NO_ID && !item["id"].is_null()) log_error("\"%s\" has an entity with an id that isn't one", path);
 
-        Vector3 rotation = item["rotation"].vector3_or({});
-        entity.position  = item["position"].vector3_or({});
-        entity.rotation  = { rotation.x, rotation.y, rotation.z };
-        entity.scale     = item["scale"].vector3_or(entity.scale);
+        Vector3 rotation  = item["rotation"].vector3_or({});
+        entity.position   = item["position"].vector3_or({});
+        entity.rotation   = { rotation.x, rotation.y, rotation.z };
+        entity.scale      = item["scale"].vector3_or(entity.scale);
+        entity.visible    = item["visible"].bool_or(true);
+        entity.selectable = item["selectable"].bool_or(true);
 
         const Json      &script = item["script"];
         std::string_view name   = script["name"].string;
@@ -281,6 +283,8 @@ bool save_level(Level *level, const Level_Assets &assets, const char *path, std:
                 item.set("rotation", Json::make_vector3({ rotation.pitch, rotation.yaw, rotation.roll }));
             if (entity.scale.x != 1.0f || entity.scale.y != 1.0f || entity.scale.z != 1.0f)
                 item.set("scale", Json::make_vector3(entity.scale));
+            if (!entity.visible) item.set("visible", Json::make_bool(false));
+            if (!entity.selectable) item.set("selectable", Json::make_bool(false));
 
             u32 kind = (u32)entity.script;
             if (entity.script != NO_SCRIPT && kind < scripts.size())
@@ -432,7 +436,8 @@ static r32 ray_on_mesh(const Mesh &mesh, Vector3 origin, Vector3 direction, r32 
     return nearest;
 }
 
-u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, r32 *distance)
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, Ray_Hits hits,
+                  r32 *distance)
 {
     // Each model is met in its own space: how far along the ray is the same there.
     u32 found   = NO_ID;
@@ -440,6 +445,8 @@ u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin
     for (u32 i = 0; i < level.entity_count; ++i)
     {
         const Entity &entity = level.entities[i];
+        if (!entity.visible || (hits == Ray_Hits::Selectable && !entity.selectable)) continue;
+
         Matrix4 transform = entity_transform(entity);
         if (entity.model == NO_MODEL || determinant3x3(transform) == 0.0f) continue; // Not there, or flattened
 
@@ -467,6 +474,6 @@ void push_level(Render_Commands *commands, const Level &level, const Level_Asset
     for (u32 i = 0; i < level.entity_count; ++i)
     {
         const Entity &entity = level.entities[i];
-        if (entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity));
+        if (entity.visible && entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity));
     }
 }

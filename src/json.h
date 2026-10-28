@@ -68,6 +68,7 @@ struct Json
     // Elements of an array, 0 for anything else.
     u64 size() const { return type == Json_Type::Array ? items.size() : 0; }
 
+    bool bool_or(bool fallback) const { return type == Json_Type::Bool ? boolean : fallback; }
     r64 number_or(r64 fallback) const { return type == Json_Type::Number ? number : fallback; }
     r32 float_or(r32 fallback) const  { return (r32)number_or(fallback); }
     // From an array of 3 numbers, as make_vector3() writes it: any of them that's

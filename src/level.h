@@ -72,12 +72,14 @@ constexpr u32 NO_ID = 0;
 // model, as a camera, is only a place for its script.
 struct Entity
 {
-    u32       id       = NO_ID;    // Unique in its level, once it's in one
-    u32       model    = NO_MODEL; // Into Level_Assets::models
-    Vector3   position = {};
-    Rotation3 rotation = {};       // Degrees, as rotation(Rotation3) turns them
-    Vector3   scale    = { 1.0f, 1.0f, 1.0f };
-    Script    script   = NO_SCRIPT;
+    u32       id         = NO_ID;    // Unique in its level, once it's in one
+    u32       model      = NO_MODEL; // Into Level_Assets::models
+    Vector3   position   = {};
+    Rotation3 rotation   = {};       // Degrees, as rotation(Rotation3) turns them
+    Vector3   scale      = { 1.0f, 1.0f, 1.0f };
+    Script    script     = NO_SCRIPT;
+    bool      visible    = true;     // Drawn: one that isn't is never in the way of a ray either
+    bool      selectable = true;     // Picked by clicking on it in the editor's view, not only from its list
     // The script's, as its struct: see script_data(). All 0 to begin with.
     alignas(8) u8 data[SCRIPT_DATA_SIZE] = {};
 };
@@ -177,7 +179,8 @@ u32 asset_model(Level_Assets *assets, const char *path);
 //   "lighting": as lighting_from_json() reads it
 //   "entities": each {"id": a number above 0, unique in the level, "model": a model's
 //               name (none for no model), "position": [x, y, z], "rotation": [pitch,
-//               yaw, roll] in degrees, "scale": [x, y, z] (1s), "script": {"name": a
+//               yaw, roll] in degrees, "scale": [x, y, z] (1s), "visible" and
+//               "selectable": false when it isn't (true), "script": {"name": a
 //               script's, "data": its fields by name, an entity by its id}}
 // Anything missing is 0 or its default, but an entity without an id (or with one
 // another has, logged) gets a new one; what's wrong is logged and left out.
@@ -215,12 +218,21 @@ u32 add_level_model(Level *level, const Level_Assets &assets, u32 model);
 // as a level is loaded, and again whenever it's shown after another.
 void scale_level_emission(const Level &level, Level_Assets *assets);
 
+// Which entities a ray can meet: all those that are visible, or only those of them that
+// are selectable too, to pick one by clicking through those that aren't.
+enum class Ray_Hits : u8
+{
+    Visible,
+    Selectable,
+};
+
 // The id of the nearest of the level's entities whose model is in the way of the ray
-// from `origin` along `direction`, through either side of its triangles: NO_ID when
-// none is. Those without a model are never in the way. `distance`, when given, is how
-// far along the ray it is, in `direction`s: INFINITY when none is.
-u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction,
+// from `origin` along `direction`, through either side of its triangles, of those
+// `hits` has: NO_ID when none is. Those without a model are never in the way.
+// `distance`, when given, is how far along the ray it is, in `direction`s: INFINITY
+// when none is.
+u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, Ray_Hits hits,
                   r32 *distance = nullptr);
 
-// What the level looks like: its entities' models, and its lighting.
+// What the level looks like: its visible entities' models, and its lighting.
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets);

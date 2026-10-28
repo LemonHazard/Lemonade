@@ -150,6 +150,9 @@ void edit_level_entities(Level *level, u32 *selected, std::span<const Script_Inf
     ImGui::DragFloat3("Position", &entity.position.x, 0.05f);
     ImGui::DragFloat3("Rotation", &entity.rotation.pitch, 1.0f, -180.0f, 180.0f, "%.0f");
     ImGui::DragFloat3("Scale", &entity.scale.x, 0.01f, 0.0f, 100.0f);
+    ImGui::Checkbox("Visible", &entity.visible);
+    ImGui::SameLine();
+    ImGui::Checkbox("Selectable", &entity.selectable);
 
     // Another script starts with its data all 0.
     if (ImGui::BeginCombo("Script", script_name(scripts, entity.script)))
@@ -430,7 +433,7 @@ static bool ray_under_mouse(const Matrix4 &world_to_clip, Vector3 *from, Vector3
 static bool point_on_level(const World &world, Vector3 from, Vector3 along, Vector3 *at)
 {
     r32 t;
-    entity_on_ray(world.level, world.assets, from, along, &t);
+    entity_on_ray(world.level, world.assets, from, along, Ray_Hits::Visible, &t);
     if (t == INFINITY && along.y != 0.0f && -from.y / along.y >= 0.0f) t = -from.y / along.y;
     if (t == INFINITY) return false;
 
@@ -496,7 +499,7 @@ void edit_in_view(World *world, Game_Frame *frame)
         bool on_gizmo =
             selected && move_with_gizmo(&world->gizmo, &selected->position, *frame->render, on_level, from, along);
         if (!on_gizmo && on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-            world->selected = entity_on_ray(level, world->assets, from, along);
+            world->selected = entity_on_ray(level, world->assets, from, along, Ray_Hits::Selectable);
     }
 
     const Entity *picked = entity_with_id(level, world->selected);
@@ -617,7 +620,7 @@ void view_palette(World *world, Game_Frame *frame)
     Vector3 from, along;
     if (ray_under_mouse(frame->render->view_projection, &from, &along))
     {
-        u32           id      = entity_on_ray(palette.level, world->assets, from, along);
+        u32           id      = entity_on_ray(palette.level, world->assets, from, along, Ray_Hits::Selectable);
         const Entity *pointed = id == palette.ground ? nullptr : entity_with_id(palette.level, id);
         u32           named   = pointed ? level_model(palette.level, pointed->model) : palette.level.model_count;
         if (named < palette.level.model_count) ImGui::SetTooltip("%s", palette.level.models[named].name);
