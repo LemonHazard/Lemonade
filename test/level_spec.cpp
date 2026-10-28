@@ -251,21 +251,21 @@ TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[
     add_entity(level.get(), {}); // No model: never in the way
 
     r32 distance = 0.0f;
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, &distance) == high.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, Ray_Hits::Visible, &distance) == high.id);
     REQUIRE(distance == 8.0f);
-    REQUIRE(entity_on_ray(*level, *assets, { 0.5f, 1.0f, 0.5f }, { 0.0f, -1.0f, 0.0f }) == low.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.5f, 1.0f, 0.5f }, { 0.0f, -1.0f, 0.0f }, Ray_Hits::Visible) == low.id);
     // From under, through their backs.
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, -10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == low.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, -10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, Ray_Hits::Visible) == low.id);
     // Behind where the ray starts.
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }) == NO_ID);
-    REQUIRE(entity_on_ray(*level, *assets, { 2.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, &distance) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, Ray_Hits::Visible) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 2.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, Ray_Hits::Visible, &distance) == NO_ID);
     REQUIRE(distance == INFINITY);
     // Turned upright and 3 times as big: from -3 to 3 up and across.
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == wall.id);
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 3.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == wall.id);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 3.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == NO_ID);
 
     wall.scale = { 0.0f, 1.0f, 3.0f };
-    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }) == NO_ID);
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == NO_ID);
 }
 
 TEST_CASE("add_level_model names a model the level hasn't by its file", "[level]")
