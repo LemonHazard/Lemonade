@@ -348,6 +348,7 @@ void update_editor(World *world, Game_Frame *frame, const Game_Definition &game)
         if (ImGui::SmallButton("Game's view")) world->camera.distance = 0.0f; // See view_editor()
         ImGui::TextDisabled("Right-drag turns too, and the wheel zooms");
         ImGui::TextDisabled("Drag the gizmo to move, with Ctrl to snap");
+        ImGui::TextDisabled("With Alt, to touch what's near the way it goes");
 
         if (world->placing)
         {
@@ -496,8 +497,8 @@ void edit_in_view(World *world, Game_Frame *frame)
     }
     else
     {
-        bool on_gizmo =
-            selected && move_with_gizmo(&world->gizmo, &selected->position, *frame->render, on_level, from, along);
+        bool on_gizmo = selected && move_with_gizmo(&world->gizmo, selected, level, world->assets, *frame->render,
+                                                    on_level, from, along);
         if (!on_gizmo && on_level && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             world->selected = entity_on_ray(level, world->assets, from, along, Ray_Hits::Selectable);
     }

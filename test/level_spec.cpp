@@ -263,6 +263,9 @@ TEST_CASE("entity_on_ray finds the nearest entity whose model is in the way", "[
     // Turned upright and 3 times as big: from -3 to 3 up and across.
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == wall.id);
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 3.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == NO_ID);
+    // Through the one ignored, to the one beyond it.
+    REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, Ray_Hits::Visible, &distance, high.id) == low.id);
+    REQUIRE(distance == 10.0f);
 
     wall.scale = { 0.0f, 1.0f, 3.0f };
     REQUIRE(entity_on_ray(*level, *assets, { 0.0f, 2.5f, 2.5f }, { 4.0f, 0.0f, 0.0f }, Ray_Hits::Visible) == NO_ID);

@@ -437,7 +437,7 @@ static r32 ray_on_mesh(const Mesh &mesh, Vector3 origin, Vector3 direction, r32 
 }
 
 u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, Ray_Hits hits,
-                  r32 *distance)
+                  r32 *distance, u32 ignored)
 {
     // Each model is met in its own space: how far along the ray is the same there.
     u32 found   = NO_ID;
@@ -445,7 +445,7 @@ u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin
     for (u32 i = 0; i < level.entity_count; ++i)
     {
         const Entity &entity = level.entities[i];
-        if (!entity.visible || (hits == Ray_Hits::Selectable && !entity.selectable)) continue;
+        if (!entity.visible || (hits == Ray_Hits::Selectable && !entity.selectable) || entity.id == ignored) continue;
 
         Matrix4 transform = entity_transform(entity);
         if (entity.model == NO_MODEL || determinant3x3(transform) == 0.0f) continue; // Not there, or flattened

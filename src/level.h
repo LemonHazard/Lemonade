@@ -230,9 +230,9 @@ enum class Ray_Hits : u8
 // from `origin` along `direction`, through either side of its triangles, of those
 // `hits` has: NO_ID when none is. Those without a model are never in the way.
 // `distance`, when given, is how far along the ray it is, in `direction`s: INFINITY
-// when none is.
+// when none is. The one with the `ignored` id is never in the way.
 u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, Ray_Hits hits,
-                  r32 *distance = nullptr);
+                  r32 *distance = nullptr, u32 ignored = NO_ID);
 
 // What the level looks like: its visible entities' models, and its lighting.
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets);

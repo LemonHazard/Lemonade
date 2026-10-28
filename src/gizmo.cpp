@@ -11,9 +11,15 @@
 // The gizmo is GIZMO_PIXELS long on the screen however far it is: its arrows are, and
 // its squares go from a quarter of that to half of it. The pointer grabs an arrow
 // GIZMO_GRAB_PIXELS from it, and Ctrl snaps what's moved to every GIZMO_SNAP meters.
-constexpr r32 GIZMO_PIXELS      = 100.0f;
-constexpr r32 GIZMO_GRAB_PIXELS = 8.0f;
-constexpr r32 GIZMO_SNAP        = 0.5f;
+// Alt snaps it to touch what's GIZMO_REACH_PIXELS from it at most, found by
+// GIZMO_TOUCH_RAYS by as many rays across its leading side, GIZMO_TOUCH_INSET of the way
+// in from its edges, so what it stands on beside them isn't in the way.
+constexpr r32 GIZMO_PIXELS       = 100.0f;
+constexpr r32 GIZMO_GRAB_PIXELS  = 8.0f;
+constexpr r32 GIZMO_SNAP         = 0.5f;
+constexpr r32 GIZMO_REACH_PIXELS = 50.0f;
+constexpr u32 GIZMO_TOUCH_RAYS   = 5;
+constexpr r32 GIZMO_TOUCH_INSET  = 0.05f;
 
 // The gizmo as it's seen: where its arrows' tips are on the screen, in ImGui's window
 // coordinates, and the corners of its squares, each indexed by the axis it's not on.
@@ -193,6 +199,82 @@ static bool point_on_gizmo(Vector3 center, u32 axes, Vector3 from, Vector3 along
     return false;
 }
 
+// Around the entity in the level's space: around its model's bounds as it's turned and
+// scaled, or the point it's at when it has none.
+static Bounds3 entity_bounds(const Entity &entity, const Level_Assets &assets)
+{
+    if (entity.model == NO_MODEL) return { entity.position, entity.position };
+
+    const Bounds3 &model     = assets.model_bounds[entity.model];
+    Matrix4        transform = entity_transform(entity);
+    Bounds3        bounds    = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (u32 corner = 0; corner < 8; ++corner)
+    {
+        Vector3 p = { corner & 1 ? model.max.x : model.min.x, corner & 2 ? model.max.y : model.min.y,
+                      corner & 4 ? model.max.z : model.min.z };
+        p         = transform_point(transform, p);
+        for (u32 axis = 0; axis < 3; ++axis)
+        {
+            (&bounds.min.x)[axis] = std::min(bounds.min[axis], p[axis]);
+            (&bounds.max.x)[axis] = std::max(bounds.max[axis], p[axis]);
+        }
+    }
+    return bounds;
+}
+
+// How far the `moved` entity goes along `axis`, `toward` its end (1) or start (-1), till
+// its bounds touch the nearest of the level's other visible models, from `reach` meters
+// back (or half its bounds, when that's less: what's in its back half is behind it) to
+// `reach` meters on: false when none is that near. Rays go along it from across the side
+// of its bounds it goes to, again only when `touch`'s last ones can't tell: they're slow
+// on big models.
+static bool distance_to_touch(const Level &level, const Level_Assets &assets, const Entity &moved, u32 axis,
+                              r32 toward, r32 reach, Gizmo_Touch *touch, r32 *distance)
+{
+    Bounds3 bounds  = entity_bounds(moved, assets);
+    r32     back    = std::min(reach, 0.5f * (bounds.max[axis] - bounds.min[axis]));
+    r32     start   = (toward > 0.0f ? bounds.max[axis] : bounds.min[axis]) - toward * back;
+    Vector3 low     = bounds.min;
+    Vector3 high    = bounds.max;
+    (&low.x)[axis]  = start;
+    (&high.x)[axis] = start;
+    u32     u       = (axis + 1) % 3;
+    u32     v       = (axis + 2) % 3;
+
+    // The same rays further on meet what the last ones did, till they're past it.
+    bool same = touch->cast && touch->toward == toward && touch->low[u] == low[u] && touch->low[v] == low[v] &&
+                touch->high[u] == high[u] && touch->high[v] == high[v];
+    r32  on   = (start - touch->low[axis]) * toward;
+    if (!same || on < 0.0f || on >= touch->nearest)
+    {
+        Vector3 along   = axis_vector(axis) * toward;
+        r32     nearest = INFINITY;
+        for (u32 i = 0; i < GIZMO_TOUCH_RAYS; ++i)
+        {
+            for (u32 j = 0; j < GIZMO_TOUCH_RAYS; ++j)
+            {
+                r32     a = GIZMO_TOUCH_INSET + (1.0f - 2.0f * GIZMO_TOUCH_INSET) * i / (GIZMO_TOUCH_RAYS - 1);
+                r32     b = GIZMO_TOUCH_INSET + (1.0f - 2.0f * GIZMO_TOUCH_INSET) * j / (GIZMO_TOUCH_RAYS - 1);
+                Vector3 origin = low;
+                (&origin.x)[u] = low[u] + (high[u] - low[u]) * a;
+                (&origin.x)[v] = low[v] + (high[v] - low[v]) * b;
+
+                r32 t;
+                entity_on_ray(level, assets, origin, along, Ray_Hits::Visible, &t, moved.id);
+                nearest = std::min(nearest, t);
+            }
+        }
+        *touch = { true, toward, low, high, nearest };
+        on     = 0.0f;
+    }
+
+    r32 nearest = touch->nearest - on;
+    if (nearest - back > reach) return false;
+
+    *distance = nearest - back;
+    return true;
+}
+
 static void draw_gizmo(const Gizmo &gizmo, u32 lit)
 {
     const ImU32 colors[3] = { IM_COL32(230, 60, 60, 255), IM_COL32(110, 205, 50, 255), IM_COL32(60, 115, 255, 255) };
@@ -229,10 +311,11 @@ static void draw_gizmo(const Gizmo &gizmo, u32 lit)
     draw->AddCircleFilled(imgui_vector(gizmo.screen_center), 4.0f, IM_COL32(255, 255, 255, 255));
 }
 
-bool move_with_gizmo(Gizmo_Drag *drag, Vector3 *position, const Render_Commands &render, bool on_level, Vector3 from,
-                     Vector3 along)
+bool move_with_gizmo(Gizmo_Drag *drag, Entity *moved, const Level &level, const Level_Assets &assets,
+                     const Render_Commands &render, bool on_level, Vector3 from, Vector3 along)
 {
-    Gizmo gizmo;
+    Vector3 *position = &moved->position;
+    Gizmo    gizmo;
     bool  seen = see_gizmo(render, *position, &gizmo);
 
     if (drag->axes && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) drag->axes = 0;
@@ -243,18 +326,31 @@ bool move_with_gizmo(Gizmo_Drag *drag, Vector3 *position, const Render_Commands 
     {
         drag->axes = pointed;
         drag->from = *position;
+        for (Gizmo_Touch &touch : drag->touches) touch = {};
     }
 
     Vector3 at;
     if (drag->axes && on_level && point_on_gizmo(drag->from, drag->axes, from, along, &at))
     {
-        Vector3 moved = at - drag->grabbed;
+        // Where the pointer has it first, on all the axes it's moved on, so what it
+        // touches on one is found where it is on the others.
+        Vector3 dragged = at - drag->grabbed;
+        for (u32 axis = 0; axis < 3; ++axis)
+            if (drag->axes & axis_bit(axis)) (&position->x)[axis] = drag->from[axis] + dragged[axis];
+
+        const ImGuiIO &io    = ImGui::GetIO();
+        r32            reach = gizmo.size * (GIZMO_REACH_PIXELS / GIZMO_PIXELS);
         for (u32 axis = 0; axis < 3; ++axis)
         {
             if (!(drag->axes & axis_bit(axis))) continue;
             r32 &moved_axis = (&position->x)[axis];
-            moved_axis      = drag->from[axis] + moved[axis];
-            if (ImGui::GetIO().KeyCtrl) moved_axis = std::round(moved_axis / GIZMO_SNAP) * GIZMO_SNAP;
+            r32  toward     = dragged[axis] > 0.0f ? 1.0f : -1.0f;
+            r32  distance;
+            if (io.KeyAlt && dragged[axis] != 0.0f &&
+                distance_to_touch(level, assets, *moved, axis, toward, reach, &drag->touches[axis], &distance))
+                moved_axis += toward * distance;
+            else if (io.KeyCtrl)
+                moved_axis = std::round(moved_axis / GIZMO_SNAP) * GIZMO_SNAP;
         }
         seen = see_gizmo(render, *position, &gizmo);
     }

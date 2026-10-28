@@ -9,12 +9,24 @@
 struct Game_Frame;
 struct Game_Memory;
 
+// The rays an Alt drag of the gizmo last cast along an axis, to find what it touches
+// (see gizmo.cpp): while it's dragged on, they'd meet the same nearer, till it's past.
+struct Gizmo_Touch
+{
+    bool    cast;
+    r32     toward;  // Along the axis to its end (1) or start (-1)
+    Vector3 low;     // The corners of the rays' grid, both where they start on the axis
+    Vector3 high;
+    r32     nearest; // How far they went to the nearest model they met: INFINITY when they met none
+};
+
 // A drag of the editor's gizmo (see gizmo.h), kept from frame to frame.
 struct Gizmo_Drag
 {
-    u32     axes;    // Moved along: bits 1, 2 and 4 for x, y and z, two for a plane, none while it isn't dragged
-    Vector3 from;    // Where it was when the drag started
-    Vector3 grabbed; // The point on the gizmo the drag started from
+    u32         axes;       // Moved along: bits 1, 2 and 4 for x, y and z, two for a plane, none while it isn't dragged
+    Vector3     from;       // Where it was when the drag started
+    Vector3     grabbed;    // The point on the gizmo the drag started from
+    Gizmo_Touch touches[3]; // On each axis
 };
 
 // What a game made of levels keeps: the level it's in, the models and textures loaded
