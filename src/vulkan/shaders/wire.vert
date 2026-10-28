@@ -5,7 +5,8 @@ layout(push_constant) uniform Push
 {
     mat4  model;       // Model to world
     vec4  color;       // sRGB-encoded, alpha not premultiplied
-    float encode_srgb; // 1 when the swapchain doesn't encode sRGB itself
+    float encode_srgb;  // 1 when the swapchain doesn't encode sRGB itself
+    float depth_offset; // The mesh's, as it was drawn
 } push;
 
 // Matches Frame_Uniforms in renderer.cpp, like the block in mesh.vert.
@@ -33,4 +34,6 @@ invariant gl_Position;
 void main()
 {
     gl_Position = frame.view_projection * (push.model * vec4(in_position, 1.0));
+    // Nearer by depth_offset once divided by w, as in mesh.vert.
+    gl_Position.z -= push.depth_offset * gl_Position.w;
 }

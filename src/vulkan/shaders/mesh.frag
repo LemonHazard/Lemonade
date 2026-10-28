@@ -7,6 +7,7 @@ layout(push_constant) uniform Push
     vec4 base_color;
     vec4 emissive_metallic;      // Emissive color, metallic
     vec4 roughness_normal_alpha; // Roughness, normal scale, alpha cutoff (0 for none), 1 when blended
+    float depth_offset;          // How much nearer it's drawn, in the depth buffer's units
 } push;
 
 // Matches Frame_Uniforms in renderer.cpp: the frame's camera and lighting, in world space.

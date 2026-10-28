@@ -26,9 +26,12 @@ public:
     // (see material.h; its textures mipmapped and repeated), lit by the frame's
     // lighting, shadowed by the meshes drawn in the frame (when its shadows are on),
     // depth-tested and back-face culled. Blended materials are drawn at the end of the
-    // frame, over the rest, from the farthest to the nearest. Nothing is drawn while the mesh or a texture
+    // frame, over the rest, from the farthest to the nearest. Where it meets another
+    // surface at the same depth, the one with the higher depth_order is seen: it's drawn
+    // a hair nearer, by depth_order steps of the depth buffer's precision. Nothing is drawn while the mesh or a texture
     // is still on its way to the GPU, which can take a few frames after their first draw.
-    void draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Material &material);
+    void draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Material &material,
+                   u32 depth_order = 0);
     // Draws index_count of the UI mesh's indices from first_index on over the frame,
     // after it's tonemapped, in the order of the calls (see Render_Command_Draw_Ui).
     // The vertices and indices are copied right away. Not drawn while the texture is
@@ -38,10 +41,11 @@ public:
     // Draws the edges of index_count of the mesh's triangles from first_index on, in
     // `color` (see Render_Command_Draw_Wireframe) over the frame once it's tonemapped,
     // under the UI, unlit: only where the mesh is seen, as drawn in the frame with the
-    // same transform. Lines are a pixel wide, and half that on the mesh's outline.
+    // same transform and depth_order. Lines are a pixel wide, and half that on the mesh's outline.
     // Nothing is drawn where the device can't tell where fragments are in their
     // triangles (logged), or while the mesh is on its way to the GPU.
-    void draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Vector4 &color);
+    void draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Vector4 &color,
+                        u32 depth_order = 0);
     // The texture's pixels changed: they're copied again before it's next drawn. Also
     // between frames, when begin_frame() returned false.
     void update_texture(const Texture &texture);

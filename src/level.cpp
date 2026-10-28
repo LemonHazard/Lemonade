@@ -474,6 +474,6 @@ void push_level(Render_Commands *commands, const Level &level, const Level_Asset
     for (u32 i = 0; i < level.entity_count; ++i)
     {
         const Entity &entity = level.entities[i];
-        if (entity.visible && entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity));
+        if (entity.visible && entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity), entity.id);
     }
 }

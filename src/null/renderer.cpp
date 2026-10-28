@@ -30,7 +30,7 @@ void Renderer::draw_test_triangle()
 {
 }
 
-void Renderer::draw_mesh(const Mesh &, u32, u32, const Matrix4 &, const Material &)
+void Renderer::draw_mesh(const Mesh &, u32, u32, const Matrix4 &, const Material &, u32)
 {
 }
 
@@ -38,7 +38,7 @@ void Renderer::draw_ui(const Ui_Mesh &, u32, u32, const Texture &, const Vector4
 {
 }
 
-void Renderer::draw_wireframe(const Mesh &, u32, u32, const Matrix4 &, const Vector4 &)
+void Renderer::draw_wireframe(const Mesh &, u32, u32, const Matrix4 &, const Vector4 &, u32)
 {
 }
 

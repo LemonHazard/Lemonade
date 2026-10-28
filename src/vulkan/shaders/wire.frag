@@ -6,7 +6,8 @@ layout(push_constant) uniform Push
 {
     mat4  model;
     vec4  color;       // sRGB-encoded, alpha not premultiplied
-    float encode_srgb; // 1 when the swapchain doesn't encode sRGB itself
+    float encode_srgb;  // 1 when the swapchain doesn't encode sRGB itself
+    float depth_offset; // The mesh's, as it was drawn
 } push;
 
 layout(location = 0) out vec4 out_color;

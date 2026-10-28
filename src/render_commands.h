@@ -44,6 +44,7 @@ struct Render_Command_Draw_Mesh
     u32      index_count;
     Matrix4  transform;   // Model to world
     Material material;    // Its textures are read then too
+    u32      depth_order; // Where surfaces meet at the same depth, the higher one is seen: entities give their ids
 };
 
 // The edges of a mesh's triangles, drawn over the frame once it's lit and tonemapped,
@@ -59,6 +60,7 @@ struct Render_Command_Draw_Wireframe
     u32      index_count;
     Matrix4  transform;   // Model to world
     Vector4  color;       // sRGB-encoded like UI colors, alpha not premultiplied
+    u32      depth_order; // The mesh's, as it was drawn
 };
 
 // Drawn over the frame once it's lit and tonemapped, in the order they're pushed, with
@@ -138,9 +140,10 @@ inline void push_test_triangle(Render_Commands *commands)
     push_render_command(commands, Render_Command_Type::Test_Triangle, sizeof(Render_Command_Header));
 }
 
-// Draws the mesh's triangles from first_index on, index_count of them (all by default).
+// Draws the mesh's triangles from first_index on, index_count of them (all by default),
+// over others at the same depth when its depth_order is higher (see Render_Command_Draw_Mesh).
 inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Material &material,
-                      u32 first_index = 0, u32 index_count = UINT32_MAX)
+                      u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0)
 {
     auto *command = (Render_Command_Draw_Mesh *)
         push_render_command(commands, Render_Command_Type::Draw_Mesh, sizeof(Render_Command_Draw_Mesh));
@@ -151,6 +154,7 @@ inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4
     command->index_count = index_count == UINT32_MAX ? mesh.index_count - first_index : index_count;
     command->transform   = transform;
     command->material    = material;
+    command->depth_order = depth_order;
 }
 
 inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
@@ -177,9 +181,9 @@ inline void push_ui(Render_Commands *commands, const Ui_Mesh &mesh, const Textur
 }
 
 // Draws the edges of the mesh's triangles from first_index on, index_count of them (all
-// by default).
+// by default), of the mesh drawn with `depth_order`.
 inline void push_wireframe(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
-                           u32 first_index = 0, u32 index_count = UINT32_MAX)
+                           u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0)
 {
     auto *command = (Render_Command_Draw_Wireframe *)
         push_render_command(commands, Render_Command_Type::Draw_Wireframe, sizeof(Render_Command_Draw_Wireframe));
@@ -190,6 +194,7 @@ inline void push_wireframe(Render_Commands *commands, const Mesh &mesh, const Ma
     command->index_count = index_count == UINT32_MAX ? mesh.index_count - first_index : index_count;
     command->transform   = transform;
     command->color       = color;
+    command->depth_order = depth_order;
 }
 
 inline void push_texture_update(Render_Commands *commands, const Texture &texture)
@@ -212,11 +217,11 @@ inline void push_forget_memory(Render_Commands *commands, const void *begin, con
 }
 
 // Every part of the model, each with its material.
-inline void push_model(Render_Commands *commands, const Model &model, const Matrix4 &transform)
+inline void push_model(Render_Commands *commands, const Model &model, const Matrix4 &transform, u32 depth_order = 0)
 {
     for (u32 i = 0; i < model.part_count; ++i)
     {
         const Model_Part &part = model.parts[i];
-        push_mesh(commands, model.mesh, transform, part.material, part.first_index, part.index_count);
+        push_mesh(commands, model.mesh, transform, part.material, part.first_index, part.index_count, depth_order);
     }
 }

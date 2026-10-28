@@ -7,6 +7,7 @@ layout(push_constant) uniform Push
     vec4 base_color;
     vec4 emissive_metallic;
     vec4 roughness_normal_alpha;
+    float depth_offset; // How much nearer it's drawn, in the depth buffer's units
 } push;
 
 // Matches Frame_Uniforms in renderer.cpp, like the block in mesh.frag.
@@ -46,6 +47,8 @@ void main()
 
     vec4 position = push.model * vec4(in_position, 1.0);
     gl_Position   = frame.view_projection * position;
+    // Nearer by depth_offset once divided by w, as in wire.vert.
+    gl_Position.z -= push.depth_offset * gl_Position.w;
     out_position  = position.xyz;
     out_normal    = sign * (cofactor * in_normal);
     out_uv        = in_uv;

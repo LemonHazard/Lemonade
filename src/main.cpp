@@ -131,7 +131,7 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             {
                 auto *command = (const Render_Command_Draw_Mesh *)header;
                 renderer.draw_mesh(command->mesh, command->first_index, command->index_count, command->transform,
-                                   command->material);
+                                   command->material, command->depth_order);
                 break;
             }
 
@@ -151,7 +151,7 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             {
                 auto *command = (const Render_Command_Draw_Wireframe *)header;
                 renderer.draw_wireframe(command->mesh, command->first_index, command->index_count, command->transform,
-                                        command->color);
+                                        command->color, command->depth_order);
                 break;
             }
 

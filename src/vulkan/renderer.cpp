@@ -246,6 +246,13 @@ struct Native_Material
     VkDescriptorSet       descriptor_set = VK_NULL_HANDLE;
 };
 
+// How much nearer a mesh is drawn for each step of its depth_order, in the depth buffer's
+// units: a few times what D24 tells apart, and D32 near the far plane, where most of what's
+// seen is, so that surfaces at the same depth, rounded apart by their own triangles, are
+// still in order. It adds up, so the highest orders are seen through what's just in
+// front of them, from far enough.
+constexpr r32 DEPTH_ORDER_STEP = 1.0f / (1 << 22);
+
 // Matches the push constant blocks in shaders/mesh.vert and mesh.frag: the transform
 // and the material's factors.
 struct Mesh_Push_Constants
@@ -254,6 +261,7 @@ struct Mesh_Push_Constants
     Vector4 base_color;
     Vector4 emissive_metallic;      // Emissive color, metallic
     Vector4 roughness_normal_alpha; // Roughness, normal scale, alpha cutoff (0 for none), 1 when blended
+    r32     depth_offset;           // How much nearer it's drawn, in the depth buffer's units
 };
 
 // A draw of a blended material, kept for the end of the frame: they're drawn after
@@ -314,9 +322,10 @@ struct Ui_Draw
 // Matches the push constant blocks in shaders/wire.vert and wire.frag.
 struct Wire_Push_Constants
 {
-    Matrix4 model;       // Model to world
-    Vector4 color;       // sRGB-encoded, alpha not premultiplied
-    r32     encode_srgb; // 1 when the swapchain doesn't encode sRGB itself
+    Matrix4 model;        // Model to world
+    Vector4 color;        // sRGB-encoded, alpha not premultiplied
+    r32     encode_srgb;  // 1 when the swapchain doesn't encode sRGB itself
+    r32     depth_offset; // The mesh's, as it was drawn
 };
 
 // A wireframe draw, kept for the end of the frame: they're drawn over it once it's
@@ -981,7 +990,7 @@ void Renderer::draw_test_triangle()
 }
 
 void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
-                         const Material &material)
+                         const Material &material, u32 depth_order)
 {
     Native_Renderer *n = this->native;
     if (!n->frame_started || index_count == 0) return;
@@ -1003,6 +1012,7 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
         .base_color             = material.base_color,
         .emissive_metallic      = { material.emissive.x, material.emissive.y, material.emissive.z, material.metallic },
         .roughness_normal_alpha = { material.roughness, material.normal_scale, cutoff, blended ? 1.0f : 0.0f },
+        .depth_offset           = (r32)depth_order * DEPTH_ORDER_STEP,
     };
 
     // With their size, so that later frames' uploads to the rest of mesh_buffer don't
@@ -1043,7 +1053,7 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
 }
 
 void Renderer::draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
-                              const Vector4 &color)
+                              const Vector4 &color, u32 depth_order)
 {
     Native_Renderer *n = this->native;
     if (!n->frame_started || !n->wire_pipeline || index_count == 0) return;
@@ -1054,7 +1064,8 @@ void Renderer::draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count
     if (!native_mesh) return;
 
     bool srgb = n->surface_format.format == VK_FORMAT_B8G8R8A8_SRGB || n->surface_format.format == VK_FORMAT_R8G8B8A8_SRGB;
-    Wire_Push_Constants push = { .model = transform, .color = color, .encode_srgb = srgb ? 0.0f : 1.0f };
+    Wire_Push_Constants push = { .model = transform, .color = color, .encode_srgb = srgb ? 0.0f : 1.0f,
+                                 .depth_offset = (r32)depth_order * DEPTH_ORDER_STEP };
     n->wire_draws.push_back({ push, native_mesh->vertex_offset, (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex),
                               native_mesh->index_offset, first_index, index_count });
 }
