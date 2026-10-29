@@ -71,13 +71,18 @@ constexpr u32 NO_ID = 0;
 
 // Something in the level: a model where it stands, and what it does. One without a
 // model, as a camera, is only a place for its script. A skinned model is posed by the
-// entity's animation, which its script plays: neither is in level files.
+// entity's animation, which its script plays (see play_animation()), faded in from the
+// one it played before: none of them is in level files.
 struct Entity
 {
     u32       id         = NO_ID;    // Unique in its level, once it's in one
     u32       model      = NO_MODEL; // Into Level_Assets::models
     u32       animation  = NO_ANIMATION; // Into Level_Assets::animations, or none for its model's rest pose
     r32       animation_time = 0.0f;     // Seconds into the animation, which loops
+    u32       faded_animation = NO_ANIMATION; // The one it fades from, or none once it's faded in
+    r32       faded_time = 0.0f;         // Seconds into that one, which goes on as it fades
+    r32       fade_time  = 0.0f;         // Seconds the fade has gone on
+    r32       fade_duration = 0.0f;      // Seconds it lasts
     Vector3   position   = {};
     Rotation3 rotation   = {};       // Degrees, as rotation(Rotation3) turns them
     Vector3   scale      = { 1.0f, 1.0f, 1.0f };
@@ -182,8 +187,18 @@ u32 asset_model(Level_Assets *assets, const char *path);
 // animations, or NO_ANIMATION when the library is full (logged).
 u32 asset_animation(Level_Assets *assets, const char *path);
 
-// The entity's model's vertices, posed by its animation, in the frame's commands (see
-// push_posed_vertices()): null when it has no animation, or its model no skin.
+// Plays `animation` (into Level_Assets::animations) on the entity, from its start, fading
+// into it from what it played over `fade` seconds (none for a cut), unless it plays it
+// already. Back to the one it's fading from, the fade turns around, from where it is.
+void play_animation(Entity *entity, u32 animation, r32 fade);
+
+// Moves the entity's animation on by `dt` seconds times `speed`, and its fade, and the
+// animation it fades from, by `dt` seconds.
+void advance_animation(Entity *entity, r32 dt, r32 speed = 1.0f);
+
+// The entity's model's vertices, posed by its animation (faded in from the one before),
+// in the frame's commands (see push_posed_vertices()): null when it has no animation,
+// or its model no skin.
 const Mesh_Vertex *push_entity_pose(Render_Commands *commands, const Entity &entity, const Level_Assets &assets);
 
 // Loads the JSON level file at `path` over whatever was in `level`, and the models it

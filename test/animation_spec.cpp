@@ -3,6 +3,7 @@
 
 #include "animation.h"
 #include "gltf.h"
+#include "level.h"
 
 #include <cmath>
 #include <cstring>
@@ -289,4 +290,87 @@ TEST_CASE("push_posed_vertices poses a skinned model into the frame's commands, 
     commands.used = commands.capacity;
     REQUIRE(!push_posed_vertices(&commands, model, animation, 0.0f));
     REQUIRE(commands.dropped == 1);
+}
+
+TEST_CASE("blend_poses goes the weight's way from one pose to the other", "[animation]")
+{
+    Skin_Joint joints[1] = { { "Root", NO_JOINT, animation_spec_pose({}), identity() } };
+    Skin       skin      = { 1, joints, nullptr };
+
+    Joint_Pose from[1] = { animation_spec_pose({ 0.0f, 0.0f, 0.0f }) };
+    Joint_Pose to[1]   = { { { 4.0f, 0.0f, 0.0f }, animation_spec_about_z(90.0f), { 3.0f, 3.0f, 3.0f } } };
+    Joint_Pose poses[1];
+    blend_poses(skin, from, to, 0.25f, poses);
+    REQUIRE(poses[0].translation.x == Approx(1.0f));
+    REQUIRE(poses[0].scale.x == Approx(1.5f));
+    REQUIRE(poses[0].rotation.z == Approx(animation_spec_about_z(22.5f).z).margin(0.01f));
+
+    blend_poses(skin, from, to, 1.0f, from); // Into one of them
+    REQUIRE(from[0].translation.x == Approx(4.0f));
+}
+
+TEST_CASE("push_posed_vertices fades from one animation to another by the weight", "[animation]")
+{
+    Skin_Joint   joints[1]   = { { "Root", NO_JOINT, animation_spec_pose({}), identity() } };
+    Skin_Weights weights[1]  = { { { 0, 0, 0, 0 }, { 1.0f, 0.0f, 0.0f, 0.0f } } };
+    Skin         skin        = { 1, joints, weights };
+    Mesh_Vertex  vertices[1] = { { {}, { 0.0f, 1.0f, 0.0f }, {} } };
+    Model model = {};
+    model.mesh = { vertices, nullptr, 1, 0 };
+    model.skin = &skin;
+
+    r32 times[1]  = { 0.0f };
+    r32 left[3]   = { -2, 0, 0 };
+    r32 right[3]  = { 2, 0, 0 };
+    Animation_Channel left_channel  = { "Root", Animation_Path::Translation, false, 1, times, left };
+    Animation_Channel right_channel = { "Root", Animation_Path::Translation, false, 1, times, right };
+    Animation to_left  = { 0.0f, 1, &left_channel };
+    Animation to_right = { 0.0f, 1, &right_channel };
+
+    alignas(16) u8 buffer[1024];
+    Render_Commands commands = {};
+    commands.buffer   = buffer;
+    commands.capacity = sizeof(buffer);
+
+    REQUIRE(push_posed_vertices(&commands, model, to_right, 0.0f, &to_left, 0.0f, 0.25f)->position.x == Approx(-1.0f));
+    REQUIRE(push_posed_vertices(&commands, model, to_right, 0.0f, &to_left, 0.0f, 1.0f)->position.x == Approx(2.0f));
+}
+
+TEST_CASE("play_animation fades from what the entity played, and advance_animation moves the fade on", "[animation]")
+{
+    Entity entity = {};
+    play_animation(&entity, 3, 0.5f);
+    REQUIRE(entity.animation == 3);
+    REQUIRE(entity.faded_animation == NO_ANIMATION); // Nothing to fade from
+
+    advance_animation(&entity, 1.0f, 2.0f);
+    REQUIRE(entity.animation_time == 2.0f);
+
+    play_animation(&entity, 3, 0.5f); // Plays it already: goes on
+    REQUIRE(entity.animation_time == 2.0f);
+
+    play_animation(&entity, 5, 0.5f);
+    REQUIRE(entity.animation == 5);
+    REQUIRE(entity.animation_time == 0.0f);
+    REQUIRE(entity.faded_animation == 3);
+    REQUIRE(entity.faded_time == 2.0f);
+
+    advance_animation(&entity, 0.125f, 2.0f);
+    REQUIRE(entity.animation_time == 0.25f);
+    REQUIRE(entity.faded_time == 2.125f);
+    REQUIRE(entity.fade_time == 0.125f);
+
+    // Back to the one it's fading from: the fade turns around, from where it is.
+    play_animation(&entity, 3, 0.5f);
+    REQUIRE(entity.animation == 3);
+    REQUIRE(entity.animation_time == 2.125f);
+    REQUIRE(entity.faded_animation == 5);
+    REQUIRE(entity.fade_time == 0.375f);
+
+    advance_animation(&entity, 0.125f);
+    REQUIRE(entity.faded_animation == NO_ANIMATION); // Faded in
+
+    play_animation(&entity, 7, 0.0f); // A cut
+    REQUIRE(entity.animation == 7);
+    REQUIRE(entity.faded_animation == NO_ANIMATION);
 }

@@ -137,11 +137,48 @@ u32 asset_animation(Level_Assets *assets, const char *path)
     return index;
 }
 
+void play_animation(Entity *entity, u32 animation, r32 fade)
+{
+    if (entity->animation == animation) return;
+
+    if (animation == entity->faded_animation && entity->faded_animation != NO_ANIMATION)
+    {
+        std::swap(entity->animation, entity->faded_animation);
+        std::swap(entity->animation_time, entity->faded_time);
+        entity->fade_time = std::max(entity->fade_duration - entity->fade_time, 0.0f);
+        return;
+    }
+
+    bool fades = fade > 0.0f && entity->animation != NO_ANIMATION;
+    entity->faded_animation = fades ? entity->animation : NO_ANIMATION;
+    entity->faded_time      = entity->animation_time;
+    entity->animation       = animation;
+    entity->animation_time  = 0.0f;
+    entity->fade_time       = 0.0f;
+    entity->fade_duration   = fades ? fade : 0.0f;
+}
+
+void advance_animation(Entity *entity, r32 dt, r32 speed)
+{
+    entity->animation_time += dt * speed;
+    if (entity->faded_animation == NO_ANIMATION) return;
+
+    entity->faded_time += dt;
+    entity->fade_time  += dt;
+    if (entity->fade_time >= entity->fade_duration) entity->faded_animation = NO_ANIMATION;
+}
+
 const Mesh_Vertex *push_entity_pose(Render_Commands *commands, const Entity &entity, const Level_Assets &assets)
 {
     if (entity.model == NO_MODEL || entity.animation == NO_ANIMATION) return nullptr;
-    return push_posed_vertices(commands, assets.models.models[entity.model],
-                               assets.animations.animations[entity.animation], entity.animation_time);
+
+    const Animation *animations = assets.animations.animations;
+    if (entity.faded_animation == NO_ANIMATION)
+        return push_posed_vertices(commands, assets.models.models[entity.model], animations[entity.animation],
+                                   entity.animation_time);
+    return push_posed_vertices(commands, assets.models.models[entity.model], animations[entity.animation],
+                               entity.animation_time, &animations[entity.faded_animation], entity.faded_time,
+                               entity.fade_time / entity.fade_duration);
 }
 
 void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Commands *commands)

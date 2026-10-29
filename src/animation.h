@@ -88,6 +88,11 @@ struct Animation
 // `poses` are left as they are. Channels for joints the skin hasn't are skipped.
 void animate_pose(const Animation &animation, r32 time, const Skin &skin, Joint_Pose *poses);
 
+// Between two poses of the skin's joints, `weight` of the way from `from` to `to`, into
+// `poses` (which may be either): translations and scales linearly, rotations the short
+// way round.
+void blend_poses(const Skin &skin, const Joint_Pose *from, const Joint_Pose *to, r32 weight, Joint_Pose *poses);
+
 // What each joint of the skin does to the vertices that follow it, posed by `poses`:
 // its transform in the model's space, through its parents', times its inverse bind matrix.
 void skin_matrices(const Skin &skin, const Joint_Pose *poses, Matrix4 *matrices);
@@ -98,10 +103,13 @@ void skin_vertices(const Mesh &mesh, const Skin &skin, const Matrix4 *matrices, 
 
 // The skinned model's vertices posed by the animation `time` seconds in, looping over its
 // duration, into the frame's commands (see push_render_data()), to draw them with
-// push_model(). Returns null when the model has no skin, or they don't fit in the
-// commands (counted as a dropped command).
+// push_model(). With an animation `faded` from, `faded_time` seconds into it, they're
+// posed `weight` of the way from its pose to the animation's (see blend_poses()).
+// Returns null when the model has no skin, or they don't fit in the commands (counted as
+// a dropped command).
 const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &model, const Animation &animation,
-                                       r32 time);
+                                       r32 time, const Animation *faded = nullptr, r32 faded_time = 0.0f,
+                                       r32 weight = 1.0f);
 
 // Animations loaded from .glb files (see load_animation_glb()), once each however many
 // times they're asked for, as the model library loads models.

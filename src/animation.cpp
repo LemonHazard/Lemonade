@@ -67,6 +67,17 @@ void animate_pose(const Animation &animation, r32 time, const Skin &skin, Joint_
     }
 }
 
+void blend_poses(const Skin &skin, const Joint_Pose *from, const Joint_Pose *to, r32 weight, Joint_Pose *poses)
+{
+    auto lerp = [&](Vector3 a, Vector3 b) { return a + (b - a) * weight; };
+    for (u32 i = 0; i < skin.joint_count; ++i)
+    {
+        Joint_Pose pose = { lerp(from[i].translation, to[i].translation), nlerp(from[i].rotation, to[i].rotation, weight),
+                            lerp(from[i].scale, to[i].scale) };
+        poses[i] = pose;
+    }
+}
+
 void skin_matrices(const Skin &skin, const Joint_Pose *poses, Matrix4 *matrices)
 {
     // In the model's space first, parents before their children, then times the inverse binds.
@@ -113,8 +124,16 @@ void skin_vertices(const Mesh &mesh, const Skin &skin, const Matrix4 *matrices, 
     }
 }
 
+// Seconds into the animation, looping over its duration.
+static r32 looped(const Animation &animation, r32 time)
+{
+    if (animation.duration <= 0.0f) return time;
+    time = std::fmod(time, animation.duration);
+    return time < 0.0f ? time + animation.duration : time;
+}
+
 const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &model, const Animation &animation,
-                                       r32 time)
+                                       r32 time, const Animation *faded, r32 faded_time, r32 weight)
 {
     if (!model.skin) return nullptr;
     const Skin &skin = *model.skin;
@@ -122,16 +141,17 @@ const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &m
     auto *posed = (Mesh_Vertex *)push_render_data(commands, (u64)model.mesh.vertex_count * sizeof(Mesh_Vertex));
     if (!posed) return nullptr;
 
-    if (animation.duration > 0.0f)
-    {
-        time = std::fmod(time, animation.duration);
-        if (time < 0.0f) time += animation.duration;
-    }
-
     Joint_Pose poses[SKIN_MAX_JOINTS];
     Matrix4    matrices[SKIN_MAX_JOINTS];
     rest_pose(skin, poses);
-    animate_pose(animation, time, skin, poses);
+    animate_pose(animation, looped(animation, time), skin, poses);
+    if (faded)
+    {
+        Joint_Pose faded_poses[SKIN_MAX_JOINTS];
+        rest_pose(skin, faded_poses);
+        animate_pose(*faded, looped(*faded, faded_time), skin, faded_poses);
+        blend_poses(skin, faded_poses, poses, clamp(weight, 0.0f, 1.0f), poses);
+    }
     skin_matrices(skin, poses, matrices);
     skin_vertices(model.mesh, skin, matrices, posed);
     return posed;
