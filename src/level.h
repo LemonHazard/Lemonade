@@ -1,5 +1,6 @@
 #pragma once
 
+#include "animation.h"
 #include "core.h"
 #include "lighting.h"
 #include "matrix.h"
@@ -69,11 +70,14 @@ constexpr u32 SCRIPT_DATA_SIZE = 32;
 constexpr u32 NO_ID = 0;
 
 // Something in the level: a model where it stands, and what it does. One without a
-// model, as a camera, is only a place for its script.
+// model, as a camera, is only a place for its script. A skinned model is posed by the
+// entity's animation, which its script plays: neither is in level files.
 struct Entity
 {
     u32       id         = NO_ID;    // Unique in its level, once it's in one
     u32       model      = NO_MODEL; // Into Level_Assets::models
+    u32       animation  = NO_ANIMATION; // Into Level_Assets::animations, or none for its model's rest pose
+    r32       animation_time = 0.0f;     // Seconds into the animation, which loops
     Vector3   position   = {};
     Rotation3 rotation   = {};       // Degrees, as rotation(Rotation3) turns them
     Vector3   scale      = { 1.0f, 1.0f, 1.0f };
@@ -107,8 +111,8 @@ inline Matrix4 entity_transform(const Entity &entity)
     return translation(entity.position) * rotation(entity.rotation) * scaling(entity.scale);
 }
 
-// The models and textures levels have, loaded once each into `storage` and kept there
-// from one level to the next: the renderer knows meshes and textures by their address
+// The models, textures and animations levels have, loaded once each into `storage` and
+// kept there from one level to the next: the renderer knows meshes and textures by their address
 // and keeps them, so their memory can't go to others. `storage` is the game's memory,
 // set before the first level is loaded.
 struct Level_Assets
@@ -120,6 +124,7 @@ struct Level_Assets
     Vector3         model_emissive[MODEL_LIBRARY_SIZE][MODEL_MAX_PARTS]; // Their parts' emission as loaded, before levels scale it
     Bounds3         model_bounds[MODEL_LIBRARY_SIZE];                    // Around their meshes, in their own space
     Texture_Library textures;
+    Animation_Library animations;
 };
 
 constexpr u32 LEVEL_MAX_MODELS   = 256;
@@ -154,14 +159,15 @@ struct Assets_Mark
     u64 storage_used;
     u32 model_count;
     u32 texture_count;
+    u32 animation_count;
 };
 
 inline Assets_Mark mark_assets(const Level_Assets &assets)
 {
-    return { assets.storage_used, assets.models.count, assets.textures.count };
+    return { assets.storage_used, assets.models.count, assets.textures.count, assets.animations.count };
 }
 
-// Lets go of the models and textures loaded since `mark`, their storage to be used for
+// Lets go of the models, textures and animations loaded since `mark`, their storage to be used for
 // others, and has the renderer forget them (see push_forget_memory()). Their indices
 // are others' from then on: nothing may still have them.
 void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Commands *commands);
@@ -170,6 +176,15 @@ void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Comman
 // for, as library_model() loads it: its index into the assets' models, or NO_MODEL when
 // it can't be loaded (logged).
 u32 asset_model(Level_Assets *assets, const char *path);
+
+// The .glb animation at `path` in the assets, loaded into their storage the first time
+// it's asked for, as library_animation() loads it: its index into the assets'
+// animations, or NO_ANIMATION when the library is full (logged).
+u32 asset_animation(Level_Assets *assets, const char *path);
+
+// The entity's model's vertices, posed by its animation, in the frame's commands (see
+// push_posed_vertices()): null when it has no animation, or its model no skin.
+const Mesh_Vertex *push_entity_pose(Render_Commands *commands, const Entity &entity, const Level_Assets &assets);
 
 // Loads the JSON level file at `path` over whatever was in `level`, and the models it
 // has that weren't loaded yet. In it:
@@ -234,5 +249,6 @@ enum class Ray_Hits : u8
 u32 entity_on_ray(const Level &level, const Level_Assets &assets, Vector3 origin, Vector3 direction, Ray_Hits hits,
                   r32 *distance = nullptr, u32 ignored = NO_ID);
 
-// What the level looks like: its visible entities' models, and its lighting.
+// What the level looks like: its visible entities' models, posed by their animations,
+// and its lighting.
 void push_level(Render_Commands *commands, const Level &level, const Level_Assets &assets);

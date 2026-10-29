@@ -506,7 +506,8 @@ void edit_in_view(World *world, Game_Frame *frame)
     const Entity *picked = entity_with_id(level, world->selected);
     if (picked && picked->model != NO_MODEL)
         push_wireframe(frame->render, world->assets.models.models[picked->model].mesh, entity_transform(*picked),
-                       picked_color(world->editor_time), 0, UINT32_MAX, picked->id);
+                       picked_color(world->editor_time), 0, UINT32_MAX, picked->id,
+                       push_entity_pose(frame->render, *picked, world->assets));
 }
 
 bool palette_shown(const World &world)

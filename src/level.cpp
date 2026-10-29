@@ -128,6 +128,22 @@ u32 asset_model(Level_Assets *assets, const char *path)
     return index;
 }
 
+u32 asset_animation(Level_Assets *assets, const char *path)
+{
+    u32 index;
+    u64 used = library_animation(&assets->animations, path, &index, assets->storage + assets->storage_used,
+                                 assets->storage_size - assets->storage_used);
+    assets->storage_used += used;
+    return index;
+}
+
+const Mesh_Vertex *push_entity_pose(Render_Commands *commands, const Entity &entity, const Level_Assets &assets)
+{
+    if (entity.model == NO_MODEL || entity.animation == NO_ANIMATION) return nullptr;
+    return push_posed_vertices(commands, assets.models.models[entity.model],
+                               assets.animations.animations[entity.animation], entity.animation_time);
+}
+
 void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Commands *commands)
 {
     if (mark.storage_used < assets->storage_used)
@@ -136,6 +152,7 @@ void release_assets(Level_Assets *assets, const Assets_Mark &mark, Render_Comman
     assets->storage_used   = mark.storage_used;
     assets->models.count   = mark.model_count;
     assets->textures.count = mark.texture_count;
+    assets->animations.count = mark.animation_count;
 }
 
 void load_level(Level *level, Level_Assets *assets, const char *path, std::span<const Script_Info> scripts)
@@ -474,6 +491,8 @@ void push_level(Render_Commands *commands, const Level &level, const Level_Asset
     for (u32 i = 0; i < level.entity_count; ++i)
     {
         const Entity &entity = level.entities[i];
-        if (entity.visible && entity.model != NO_MODEL) push_model(commands, assets.models.models[entity.model], entity_transform(entity), entity.id);
+        if (entity.visible && entity.model != NO_MODEL)
+            push_model(commands, assets.models.models[entity.model], entity_transform(entity), entity.id,
+                       push_entity_pose(commands, entity, assets));
     }
 }
