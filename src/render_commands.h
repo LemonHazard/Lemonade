@@ -23,6 +23,7 @@ enum class Render_Command_Type : u32
     Update_Texture,
     Draw_Wireframe,
     Forget_Memory,
+    Data,
 };
 
 // Every command starts with this header; `size` covers the header and the command's
@@ -45,6 +46,11 @@ struct Render_Command_Draw_Mesh
     Matrix4  transform;   // Model to world
     Material material;    // Its textures are read then too
     u32      depth_order; // Where surfaces meet at the same depth, the higher one is seen: entities give their ids
+    // Drawn instead of the mesh's vertices when set, as many of them, for this frame only:
+    // a skinned model's, posed (see push_posed_model()). The renderer copies them every
+    // frame, so they can be anywhere that lasts till the frame's drawn: in the frame's
+    // commands, usually (see push_render_data()). The mesh's indices are drawn with them.
+    const Mesh_Vertex *posed;
 };
 
 // The edges of a mesh's triangles, drawn over the frame once it's lit and tonemapped,
@@ -61,6 +67,7 @@ struct Render_Command_Draw_Wireframe
     Matrix4  transform;   // Model to world
     Vector4  color;       // sRGB-encoded like UI colors, alpha not premultiplied
     u32      depth_order; // The mesh's, as it was drawn
+    const Mesh_Vertex *posed; // The mesh's, as it was drawn (see Render_Command_Draw_Mesh)
 };
 
 // Drawn over the frame once it's lit and tonemapped, in the order they're pushed, with
@@ -135,6 +142,22 @@ inline Render_Command_Header *push_render_command(Render_Commands *commands, Ren
     return header;
 }
 
+// `size` bytes for the frame's other commands to point to, as posed vertices: they're
+// there until the frame's drawn. Returns nullptr when the buffer is full (counted as a
+// dropped command).
+inline void *push_render_data(Render_Commands *commands, u64 size)
+{
+    u64 header = (sizeof(Render_Command_Header) + alignof(std::max_align_t) - 1) & ~(alignof(std::max_align_t) - 1);
+    if (size > UINT32_MAX - header)
+    {
+        ++commands->dropped;
+        return nullptr;
+    }
+
+    auto *data = (u8 *)push_render_command(commands, Render_Command_Type::Data, (u32)(header + size));
+    return data ? data + header : nullptr;
+}
+
 inline void push_test_triangle(Render_Commands *commands)
 {
     push_render_command(commands, Render_Command_Type::Test_Triangle, sizeof(Render_Command_Header));
@@ -142,8 +165,10 @@ inline void push_test_triangle(Render_Commands *commands)
 
 // Draws the mesh's triangles from first_index on, index_count of them (all by default),
 // over others at the same depth when its depth_order is higher (see Render_Command_Draw_Mesh).
+// With `posed` vertices, they're drawn instead of the mesh's (see Render_Command_Draw_Mesh).
 inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Material &material,
-                      u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0)
+                      u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0,
+                      const Mesh_Vertex *posed = nullptr)
 {
     auto *command = (Render_Command_Draw_Mesh *)
         push_render_command(commands, Render_Command_Type::Draw_Mesh, sizeof(Render_Command_Draw_Mesh));
@@ -155,6 +180,7 @@ inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4
     command->transform   = transform;
     command->material    = material;
     command->depth_order = depth_order;
+    command->posed       = posed;
 }
 
 inline void push_mesh(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
@@ -181,9 +207,10 @@ inline void push_ui(Render_Commands *commands, const Ui_Mesh &mesh, const Textur
 }
 
 // Draws the edges of the mesh's triangles from first_index on, index_count of them (all
-// by default), of the mesh drawn with `depth_order`.
+// by default), of the mesh drawn with `depth_order` and `posed`.
 inline void push_wireframe(Render_Commands *commands, const Mesh &mesh, const Matrix4 &transform, const Vector4 &color,
-                           u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0)
+                           u32 first_index = 0, u32 index_count = UINT32_MAX, u32 depth_order = 0,
+                           const Mesh_Vertex *posed = nullptr)
 {
     auto *command = (Render_Command_Draw_Wireframe *)
         push_render_command(commands, Render_Command_Type::Draw_Wireframe, sizeof(Render_Command_Draw_Wireframe));
@@ -195,6 +222,7 @@ inline void push_wireframe(Render_Commands *commands, const Mesh &mesh, const Ma
     command->transform   = transform;
     command->color       = color;
     command->depth_order = depth_order;
+    command->posed       = posed;
 }
 
 inline void push_texture_update(Render_Commands *commands, const Texture &texture)
@@ -216,12 +244,13 @@ inline void push_forget_memory(Render_Commands *commands, const void *begin, con
     command->end   = end;
 }
 
-// Every part of the model, each with its material.
-inline void push_model(Render_Commands *commands, const Model &model, const Matrix4 &transform, u32 depth_order = 0)
+// Every part of the model, each with its material, `posed` as push_mesh()'s.
+inline void push_model(Render_Commands *commands, const Model &model, const Matrix4 &transform, u32 depth_order = 0,
+                       const Mesh_Vertex *posed = nullptr)
 {
     for (u32 i = 0; i < model.part_count; ++i)
     {
         const Model_Part &part = model.parts[i];
-        push_mesh(commands, model.mesh, transform, part.material, part.first_index, part.index_count, depth_order);
+        push_mesh(commands, model.mesh, transform, part.material, part.first_index, part.index_count, depth_order, posed);
     }
 }

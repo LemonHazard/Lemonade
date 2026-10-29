@@ -119,6 +119,9 @@ constexpr u32 MAX_BLOOM_LEVELS     = 8;
 // UI vertices and indices are copied to a buffer of this size each frame: past it, the
 // rest of the frame's UI isn't drawn.
 constexpr u64 UI_BUFFER_SIZE       = 8 * MiB;
+// Posed vertices (see draw_mesh()) are copied to a buffer of this size each frame: past
+// it, the rest of the frame's posed meshes aren't drawn.
+constexpr u64 POSED_BUFFER_SIZE    = 32 * MiB;
 
 // Matches the uniform blocks in shaders/mesh.vert and mesh.frag (std140: vec3s padded
 // to vec4s).
@@ -195,6 +198,13 @@ struct Native_Renderer_Frame
     VkDeviceMemory  ui_memory      = VK_NULL_HANDLE;
     u8             *ui_mapped      = nullptr;
     u64             ui_used        = 0;
+
+    // Host-visible posed vertices of the frame's meshes, which its draws read from
+    // there: filled from the start each frame, like the staging buffer.
+    VkBuffer        posed_buffer   = VK_NULL_HANDLE;
+    VkDeviceMemory  posed_memory   = VK_NULL_HANDLE;
+    u8             *posed_mapped   = nullptr;
+    u64             posed_used     = 0;
 };
 
 // A mesh copied to mesh_buffer, recognized by the game's pointers and counts. No
@@ -270,7 +280,8 @@ struct Blended_Draw
 {
     Mesh_Push_Constants push;
     VkDescriptorSet     material_set;
-    VkDeviceSize        vertex_offset; // In mesh_buffer
+    VkBuffer            vertex_buffer; // mesh_buffer, or the frame's posed_buffer
+    VkDeviceSize        vertex_offset;
     VkDeviceSize        vertex_size;
     VkDeviceSize        index_offset;
     u32                 first_index;
@@ -333,7 +344,8 @@ struct Wire_Push_Constants
 struct Wire_Draw
 {
     Wire_Push_Constants push;
-    VkDeviceSize        vertex_offset; // In mesh_buffer
+    VkBuffer            vertex_buffer; // mesh_buffer, or the frame's posed_buffer
+    VkDeviceSize        vertex_offset;
     VkDeviceSize        vertex_size;
     VkDeviceSize        index_offset;
     u32                 first_index;
@@ -417,6 +429,11 @@ public:
     // The GPU copy of a mesh, recorded into the frame's uploads the first time it's
     // drawn. Returns nullptr when the mesh can't be drawn this frame (logged).
     const Native_Mesh *find_mesh(const Mesh &mesh, Native_Renderer_Frame &frame);
+    // Where a draw reads the mesh's vertices from: mesh_buffer, or, for `posed` ones,
+    // the frame's posed_buffer, where they're copied. Returns false when they don't fit
+    // in it (logged).
+    bool find_vertices(const Mesh &mesh, const Native_Mesh &native_mesh, const Mesh_Vertex *posed,
+                       Native_Renderer_Frame &frame, VkBuffer *buffer, VkDeviceSize *offset);
     // A range of mesh_buffer of `size` bytes, the first one that fits: false when none does.
     bool allocate_mesh_range(u64 size, u64 *offset);
     void free_mesh_range(Mesh_Range range);
@@ -506,6 +523,10 @@ public:
     Ui_Mesh                   ui_copied        = {};
     VkDeviceSize              ui_vertex_offset = 0;
     VkDeviceSize              ui_index_offset  = 0;
+    // The posed vertices last copied to the frame's posed_buffer and where they went:
+    // draws of a model's parts share the copy.
+    const Mesh_Vertex        *posed_copied     = nullptr;
+    VkDeviceSize              posed_offset     = 0;
 
     VkPipelineLayout pipeline_layout      = VK_NULL_HANDLE;
     VkPipeline       pipeline             = VK_NULL_HANDLE;
@@ -588,6 +609,7 @@ public:
     bool textures_full_logged = false;
     bool materials_full_logged = false;
     bool ui_full_logged        = false;
+    bool posed_full_logged     = false;
 };
 
 // Fibonacci hashing of an address into a table of 2^bits slots: the low bits are
@@ -703,6 +725,8 @@ Renderer::~Renderer()
             if (frame.uniform_memory) vkFreeMemory(n->device, frame.uniform_memory, nullptr);
             if (frame.ui_buffer)      vkDestroyBuffer(n->device, frame.ui_buffer, nullptr);
             if (frame.ui_memory)      vkFreeMemory(n->device, frame.ui_memory, nullptr); // Unmaps it
+            if (frame.posed_buffer)   vkDestroyBuffer(n->device, frame.posed_buffer, nullptr);
+            if (frame.posed_memory)   vkFreeMemory(n->device, frame.posed_memory, nullptr); // Unmaps it
         }
 
         vkDestroyDevice(n->device, nullptr);
@@ -865,11 +889,13 @@ bool Renderer::begin_frame(const Render_Commands &commands)
     n->blended_draws.clear();
     n->ui_draws.clear();
     n->wire_draws.clear();
-    n->ui_copied = {};
+    n->ui_copied    = {};
+    n->posed_copied = nullptr;
     vkResetCommandPool(n->device, frame.command_pool, 0); // Both of its command buffers
     frame.uploading    = false;
     frame.staging_used = 0;
     frame.ui_used      = 0;
+    frame.posed_used   = 0;
 
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -990,7 +1016,7 @@ void Renderer::draw_test_triangle()
 }
 
 void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
-                         const Material &material, u32 depth_order)
+                         const Material &material, u32 depth_order, const Mesh_Vertex *posed)
 {
     Native_Renderer *n = this->native;
     if (!n->frame_started || index_count == 0) return;
@@ -1005,6 +1031,10 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     VkDescriptorSet material_set = n->find_material(material, frame);
     if (!material_set) return;
 
+    VkBuffer     vertex_buffer;
+    VkDeviceSize offset;
+    if (!n->find_vertices(mesh, *native_mesh, posed, frame, &vertex_buffer, &offset)) return;
+
     bool blended = material.alpha_mode == Alpha_Mode::Blend;
     r32  cutoff  = material.alpha_mode == Alpha_Mode::Mask ? material.alpha_cutoff : 0.0f;
     Mesh_Push_Constants push = {
@@ -1018,20 +1048,19 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     // With their size, so that later frames' uploads to the rest of mesh_buffer don't
     // look like they could overwrite what this draw reads.
     VkCommandBuffer command_buffer = frame.command_buffer;
-    VkDeviceSize    offset         = native_mesh->vertex_offset;
     VkDeviceSize    size           = (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex);
 
     // Blended surfaces cast no shadow.
     if (blended)
     {
         Vector3 origin = { transform.at(0, 3), transform.at(1, 3), transform.at(2, 3) };
-        n->blended_draws.push_back({ push, material_set, offset, size, native_mesh->index_offset, first_index, index_count,
-                                     length(origin - n->camera_position) });
+        n->blended_draws.push_back({ push, material_set, vertex_buffer, offset, size, native_mesh->index_offset, first_index,
+                                     index_count, length(origin - n->camera_position) });
         return;
     }
 
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline);
-    vkCmdBindVertexBuffers2(command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
+    vkCmdBindVertexBuffers2(command_buffer, 0, 1, &vertex_buffer, &offset, &size, nullptr);
     vkCmdBindIndexBuffer(command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
     VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, material_set };
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, n->mesh_pipeline_layout,
@@ -1044,7 +1073,7 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
     {
         Shadow_Push_Constants shadow_push = { transform };
         VkCommandBuffer shadow_command_buffer = frame.shadow_command_buffer;
-        vkCmdBindVertexBuffers2(shadow_command_buffer, 0, 1, &n->mesh_buffer, &offset, &size, nullptr);
+        vkCmdBindVertexBuffers2(shadow_command_buffer, 0, 1, &vertex_buffer, &offset, &size, nullptr);
         vkCmdBindIndexBuffer(shadow_command_buffer, n->mesh_buffer, native_mesh->index_offset, VK_INDEX_TYPE_UINT32);
         vkCmdPushConstants(shadow_command_buffer, n->shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
                            0, sizeof(shadow_push), &shadow_push);
@@ -1053,7 +1082,7 @@ void Renderer::draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, con
 }
 
 void Renderer::draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform,
-                              const Vector4 &color, u32 depth_order)
+                              const Vector4 &color, u32 depth_order, const Mesh_Vertex *posed)
 {
     Native_Renderer *n = this->native;
     if (!n->frame_started || !n->wire_pipeline || index_count == 0) return;
@@ -1063,10 +1092,14 @@ void Renderer::draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count
     const Native_Mesh *native_mesh = n->find_mesh(mesh, frame);
     if (!native_mesh) return;
 
+    VkBuffer     vertex_buffer;
+    VkDeviceSize offset;
+    if (!n->find_vertices(mesh, *native_mesh, posed, frame, &vertex_buffer, &offset)) return;
+
     bool srgb = n->surface_format.format == VK_FORMAT_B8G8R8A8_SRGB || n->surface_format.format == VK_FORMAT_R8G8B8A8_SRGB;
     Wire_Push_Constants push = { .model = transform, .color = color, .encode_srgb = srgb ? 0.0f : 1.0f,
                                  .depth_offset = (r32)depth_order * DEPTH_ORDER_STEP };
-    n->wire_draws.push_back({ push, native_mesh->vertex_offset, (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex),
+    n->wire_draws.push_back({ push, vertex_buffer, offset, (VkDeviceSize)mesh.vertex_count * sizeof(Mesh_Vertex),
                               native_mesh->index_offset, first_index, index_count });
 }
 
@@ -1472,7 +1505,7 @@ void Native_Renderer::record_blended_draws(VkCommandBuffer command_buffer, Nativ
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->mesh_blend_pipeline);
     for (const Blended_Draw &draw : this->blended_draws)
     {
-        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &this->mesh_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
+        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &draw.vertex_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
         vkCmdBindIndexBuffer(command_buffer, this->mesh_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
         VkDescriptorSet descriptor_sets[2] = { frame.descriptor_set, draw.material_set };
         vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->mesh_pipeline_layout,
@@ -1714,7 +1747,7 @@ void Native_Renderer::record_wire_draws(VkCommandBuffer command_buffer, Native_R
                             0, 1, &frame.descriptor_set, 0, nullptr);
     for (const Wire_Draw &draw : this->wire_draws)
     {
-        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &this->mesh_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
+        vkCmdBindVertexBuffers2(command_buffer, 0, 1, &draw.vertex_buffer, &draw.vertex_offset, &draw.vertex_size, nullptr);
         vkCmdBindIndexBuffer(command_buffer, this->mesh_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
         vkCmdPushConstants(command_buffer, this->wire_pipeline_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.push), &draw.push);
@@ -2183,6 +2216,12 @@ bool Native_Renderer::create_frames()
                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                  &frame.ui_buffer, &frame.ui_memory)) return false;
         if (!vk_check(vkMapMemory(this->device, frame.ui_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.ui_mapped),
+                      "vkMapMemory")) return false;
+
+        if (!this->create_buffer(POSED_BUFFER_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                 &frame.posed_buffer, &frame.posed_memory)) return false;
+        if (!vk_check(vkMapMemory(this->device, frame.posed_memory, 0, VK_WHOLE_SIZE, 0, (void **)&frame.posed_mapped),
                       "vkMapMemory")) return false;
     }
 
@@ -3048,6 +3087,43 @@ const Native_Mesh *Native_Renderer::find_mesh(const Mesh &mesh, Native_Renderer_
     frame.staging_used += size;
     this->mesh_count   += 1;
     return created;
+}
+
+bool Native_Renderer::find_vertices(const Mesh &mesh, const Native_Mesh &native_mesh, const Mesh_Vertex *posed,
+                                    Native_Renderer_Frame &frame, VkBuffer *buffer, VkDeviceSize *offset)
+{
+    if (!posed)
+    {
+        *buffer = this->mesh_buffer;
+        *offset = native_mesh.vertex_offset;
+        return true;
+    }
+
+    // At a 16-byte aligned offset, unless they're the last ones copied.
+    if (posed != this->posed_copied)
+    {
+        u64 start = (frame.posed_used + 15) & ~(u64)15;
+        u64 size  = (u64)mesh.vertex_count * sizeof(Mesh_Vertex);
+        if (start > POSED_BUFFER_SIZE || size > POSED_BUFFER_SIZE - start)
+        {
+            if (!this->posed_full_logged)
+            {
+                log_warn("Posed meshes past %llu MiB of vertices in a frame aren't drawn",
+                         (unsigned long long)(POSED_BUFFER_SIZE / MiB));
+                this->posed_full_logged = true;
+            }
+            return false;
+        }
+
+        memcpy(frame.posed_mapped + start, posed, size);
+        frame.posed_used   = start + size;
+        this->posed_copied = posed;
+        this->posed_offset = start;
+    }
+
+    *buffer = frame.posed_buffer;
+    *offset = this->posed_offset;
+    return true;
 }
 
 bool Native_Renderer::allocate_mesh_range(u64 size, u64 *offset)

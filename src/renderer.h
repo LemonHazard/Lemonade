@@ -30,8 +30,10 @@ public:
     // surface at the same depth, the one with the higher depth_order is seen: it's drawn
     // a hair nearer, by depth_order steps of the depth buffer's precision. Nothing is drawn while the mesh or a texture
     // is still on its way to the GPU, which can take a few frames after their first draw.
+    // With `posed` vertices (as many as the mesh's, see Render_Command_Draw_Mesh), they're
+    // drawn instead of the mesh's: they're copied this frame, once for draws of the same in a row.
     void draw_mesh(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Material &material,
-                   u32 depth_order = 0);
+                   u32 depth_order = 0, const Mesh_Vertex *posed = nullptr);
     // Draws index_count of the UI mesh's indices from first_index on over the frame,
     // after it's tonemapped, in the order of the calls (see Render_Command_Draw_Ui).
     // The vertices and indices are copied right away. Not drawn while the texture is
@@ -43,9 +45,9 @@ public:
     // under the UI, unlit: only where the mesh is seen, as drawn in the frame with the
     // same transform and depth_order. Lines are a pixel wide, and half that on the mesh's outline.
     // Nothing is drawn where the device can't tell where fragments are in their
-    // triangles (logged), or while the mesh is on its way to the GPU.
+    // triangles (logged), or while the mesh is on its way to the GPU. `posed` as draw_mesh()'s.
     void draw_wireframe(const Mesh &mesh, u32 first_index, u32 index_count, const Matrix4 &transform, const Vector4 &color,
-                        u32 depth_order = 0);
+                        u32 depth_order = 0, const Mesh_Vertex *posed = nullptr);
     // The texture's pixels changed: they're copied again before it's next drawn. Also
     // between frames, when begin_frame() returned false.
     void update_texture(const Texture &texture);

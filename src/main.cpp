@@ -30,7 +30,7 @@
 
 constexpr u64 GAME_PERMANENT_MEMORY_SIZE = 1 * GiB;
 constexpr u64 GAME_TRANSIENT_MEMORY_SIZE = 256 * MiB;
-constexpr u64 RENDER_COMMANDS_SIZE       = 1 * MiB;
+constexpr u64 RENDER_COMMANDS_SIZE       = 16 * MiB; // Posed vertices included (see push_render_data())
 // Longer frames (a debugger pause, a slow reload, a dragged window) reach the game as
 // this long: it slows down for a frame instead of jumping.
 constexpr r32 MAX_FRAME_DT               = 0.1f;
@@ -131,7 +131,7 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             {
                 auto *command = (const Render_Command_Draw_Mesh *)header;
                 renderer.draw_mesh(command->mesh, command->first_index, command->index_count, command->transform,
-                                   command->material, command->depth_order);
+                                   command->material, command->depth_order, command->posed);
                 break;
             }
 
@@ -151,12 +151,15 @@ static void draw(Renderer &renderer, const Render_Commands &commands)
             {
                 auto *command = (const Render_Command_Draw_Wireframe *)header;
                 renderer.draw_wireframe(command->mesh, command->first_index, command->index_count, command->transform,
-                                        command->color, command->depth_order);
+                                        command->color, command->depth_order, command->posed);
                 break;
             }
 
             case Render_Command_Type::Forget_Memory:
                 break; // Before the frame (see forget_memory())
+
+            case Render_Command_Type::Data:
+                break; // Read by the commands that point to it
         }
 
         if (header->size == 0)
