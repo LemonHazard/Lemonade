@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -255,7 +256,7 @@ TEST_CASE("skin_vertices moves each vertex by its joints, weighed, and leaves th
     REQUIRE(posed[2].position.x == 3.0f);
 }
 
-TEST_CASE("push_posed_vertices poses a skinned model into the frame's commands, looping its animation", "[animation]")
+TEST_CASE("push_posed_vertices poses a skinned model into the frame's commands", "[animation]")
 {
     Skin_Joint   joints[1]  = { { "Root", NO_JOINT, animation_spec_pose({}), identity() } };
     Skin_Weights weights[1] = { { { 0, 0, 0, 0 }, { 1.0f, 0.0f, 0.0f, 0.0f } } };
@@ -275,7 +276,7 @@ TEST_CASE("push_posed_vertices poses a skinned model into the frame's commands, 
     commands.buffer   = buffer;
     commands.capacity = sizeof(buffer);
 
-    const Mesh_Vertex *posed = push_posed_vertices(&commands, model, animation, 5.0f); // 1 s in
+    const Mesh_Vertex *posed = push_posed_vertices(&commands, model, animation, 1.0f);
     REQUIRE(posed);
     REQUIRE((const u8 *)posed > buffer);
     REQUIRE((const u8 *)posed < buffer + commands.used);
@@ -372,4 +373,62 @@ TEST_CASE("play_animation fades from what was played, and advance_animation move
     play_animation(&state, 7, 0.0f); // A cut
     REQUIRE(state.current == 7);
     REQUIRE(state.faded == NO_ANIMATION);
+}
+
+TEST_CASE("push_posed_vertices poses what an animation state plays, looping or held at its end", "[animation]")
+{
+    Skin_Joint   joints[1]   = { { "Root", NO_JOINT, animation_spec_pose({}), identity() } };
+    Skin_Weights weights[1]  = { { { 0, 0, 0, 0 }, { 1.0f, 0.0f, 0.0f, 0.0f } } };
+    Skin         skin        = { 1, joints, weights };
+    Mesh_Vertex  vertices[1] = { { {}, { 0.0f, 1.0f, 0.0f }, {} } };
+    Model model = {};
+    model.mesh = { vertices, nullptr, 1, 0 };
+    model.skin = &skin;
+
+    r32 times[2] = { 0.0f, 2.0f };
+    r32 moves[6] = { 0, 0, 0,   4, 0, 0 };
+    Animation_Channel channel = { "Root", Animation_Path::Translation, false, 2, times, moves };
+    auto library = std::make_unique<Animation_Library>();
+    library->count         = 1;
+    library->animations[0] = { 2.0f, 1, &channel };
+
+    alignas(16) u8 buffer[1024];
+    Render_Commands commands = {};
+    commands.buffer   = buffer;
+    commands.capacity = sizeof(buffer);
+
+    Animation_State state = {};
+    REQUIRE(!push_posed_vertices(&commands, model, state, *library)); // Plays none
+    REQUIRE(animation_left(state, *library) == INFINITY);
+
+    play_animation(&state, 0, 0.0f);
+    advance_animation(&state, 5.0f);
+    REQUIRE(push_posed_vertices(&commands, model, state, *library)->position.x == Approx(2.0f)); // 1 s into its loop
+    REQUIRE(animation_left(state, *library) == INFINITY);
+
+    state = {};
+    play_animation(&state, 0, 0.0f, false);
+    advance_animation(&state, 1.5f);
+    REQUIRE(animation_left(state, *library) == 0.5f);
+    advance_animation(&state, 3.5f);
+    REQUIRE(push_posed_vertices(&commands, model, state, *library)->position.x == Approx(4.0f)); // Held at its end
+    REQUIRE(animation_left(state, *library) == 0.0f);
+}
+
+TEST_CASE("play_animation starts one that plays once over, even when it's fading from it", "[animation]")
+{
+    Animation_State state = {};
+    play_animation(&state, 3, 0.5f, false);
+    advance_animation(&state, 1.0f);
+    play_animation(&state, 5, 0.5f);
+    REQUIRE(state.faded == 3);
+    REQUIRE(!state.faded_loops);
+    REQUIRE(state.loops);
+
+    play_animation(&state, 3, 0.5f, false);
+    REQUIRE(state.current == 3);
+    REQUIRE(state.time == 0.0f); // From its start, not where it was
+    REQUIRE(!state.loops);
+    REQUIRE(state.faded == 5);
+    REQUIRE(state.fade_time == 0.0f);
 }

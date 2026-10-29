@@ -126,10 +126,10 @@ void skin_vertices(const Mesh &mesh, const Skin &skin, const Matrix4 *matrices, 
     }
 }
 
-// Seconds into the animation, looping over its duration.
-static r32 looped(const Animation &animation, r32 time)
+// Seconds into the animation, looping over its duration when it `loops`.
+static r32 looped(const Animation &animation, r32 time, bool loops)
 {
-    if (animation.duration <= 0.0f) return time;
+    if (!loops || animation.duration <= 0.0f) return time;
     time = std::fmod(time, animation.duration);
     return time < 0.0f ? time + animation.duration : time;
 }
@@ -146,12 +146,12 @@ const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &m
     Joint_Pose poses[SKIN_MAX_JOINTS];
     Matrix4    matrices[SKIN_MAX_JOINTS];
     rest_pose(skin, poses);
-    animate_pose(animation, looped(animation, time), skin, poses);
+    animate_pose(animation, time, skin, poses);
     if (faded)
     {
         Joint_Pose faded_poses[SKIN_MAX_JOINTS];
         rest_pose(skin, faded_poses);
-        animate_pose(*faded, looped(*faded, faded_time), skin, faded_poses);
+        animate_pose(*faded, faded_time, skin, faded_poses);
         blend_poses(skin, faded_poses, poses, clamp(weight, 0.0f, 1.0f), poses);
     }
     skin_matrices(skin, poses, matrices);
@@ -159,14 +159,15 @@ const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &m
     return posed;
 }
 
-void play_animation(Animation_State *state, u32 animation, r32 fade)
+void play_animation(Animation_State *state, u32 animation, r32 fade, bool loops)
 {
     if (state->current == animation) return;
 
-    if (animation == state->faded && state->faded != NO_ANIMATION)
+    if (animation == state->faded && state->faded != NO_ANIMATION && loops && state->faded_loops)
     {
         std::swap(state->current, state->faded);
         std::swap(state->time, state->faded_time);
+        std::swap(state->loops, state->faded_loops);
         state->fade_time = std::max(state->fade_duration - state->fade_time, 0.0f);
         return;
     }
@@ -174,8 +175,10 @@ void play_animation(Animation_State *state, u32 animation, r32 fade)
     bool fades = fade > 0.0f && state->current != NO_ANIMATION;
     state->faded         = fades ? state->current : NO_ANIMATION;
     state->faded_time    = state->time;
+    state->faded_loops   = state->loops;
     state->current       = animation;
     state->time          = 0.0f;
+    state->loops         = loops;
     state->fade_time     = 0.0f;
     state->fade_duration = fades ? fade : 0.0f;
 }
@@ -190,14 +193,23 @@ void advance_animation(Animation_State *state, r32 dt, r32 speed)
     if (state->fade_time >= state->fade_duration) state->faded = NO_ANIMATION;
 }
 
+r32 animation_left(const Animation_State &state, const Animation_Library &library)
+{
+    if (state.current == NO_ANIMATION || state.loops) return INFINITY;
+    return std::max(library.animations[state.current].duration - state.time, 0.0f);
+}
+
 const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &model, const Animation_State &state,
                                        const Animation_Library &library)
 {
     if (state.current == NO_ANIMATION) return nullptr;
 
     const Animation &current = library.animations[state.current];
-    if (state.faded == NO_ANIMATION) return push_posed_vertices(commands, model, current, state.time);
-    return push_posed_vertices(commands, model, current, state.time, &library.animations[state.faded], state.faded_time,
+    r32              time    = looped(current, state.time, state.loops);
+    if (state.faded == NO_ANIMATION) return push_posed_vertices(commands, model, current, time);
+
+    const Animation &faded = library.animations[state.faded];
+    return push_posed_vertices(commands, model, current, time, &faded, looped(faded, state.faded_time, state.faded_loops),
                                state.fade_time / state.fade_duration);
 }
 
