@@ -2,8 +2,10 @@
 #include "gltf.h"
 #include "logger.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 u32 find_joint(const Skin &skin, const char *name)
 {
@@ -155,6 +157,48 @@ const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &m
     skin_matrices(skin, poses, matrices);
     skin_vertices(model.mesh, skin, matrices, posed);
     return posed;
+}
+
+void play_animation(Animation_State *state, u32 animation, r32 fade)
+{
+    if (state->current == animation) return;
+
+    if (animation == state->faded && state->faded != NO_ANIMATION)
+    {
+        std::swap(state->current, state->faded);
+        std::swap(state->time, state->faded_time);
+        state->fade_time = std::max(state->fade_duration - state->fade_time, 0.0f);
+        return;
+    }
+
+    bool fades = fade > 0.0f && state->current != NO_ANIMATION;
+    state->faded         = fades ? state->current : NO_ANIMATION;
+    state->faded_time    = state->time;
+    state->current       = animation;
+    state->time          = 0.0f;
+    state->fade_time     = 0.0f;
+    state->fade_duration = fades ? fade : 0.0f;
+}
+
+void advance_animation(Animation_State *state, r32 dt, r32 speed)
+{
+    state->time += dt * speed;
+    if (state->faded == NO_ANIMATION) return;
+
+    state->faded_time += dt;
+    state->fade_time  += dt;
+    if (state->fade_time >= state->fade_duration) state->faded = NO_ANIMATION;
+}
+
+const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &model, const Animation_State &state,
+                                       const Animation_Library &library)
+{
+    if (state.current == NO_ANIMATION) return nullptr;
+
+    const Animation &current = library.animations[state.current];
+    if (state.faded == NO_ANIMATION) return push_posed_vertices(commands, model, current, state.time);
+    return push_posed_vertices(commands, model, current, state.time, &library.animations[state.faded], state.faded_time,
+                               state.fade_time / state.fade_duration);
 }
 
 u64 library_animation(Animation_Library *library, const char *path, u32 *index, void *storage, u64 storage_size)

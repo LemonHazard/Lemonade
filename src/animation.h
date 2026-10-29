@@ -130,3 +130,30 @@ struct Animation_Library
 // is kept without channels, posing nothing, so that it isn't tried again on the next ask.
 // When the library is full (logged), `index` is NO_ANIMATION.
 u64 library_animation(Animation_Library *library, const char *path, u32 *index, void *storage, u64 storage_size);
+
+// What something plays, as an entity does: an animation of the library, faded into from
+// the one it played before.
+struct Animation_State
+{
+    u32 current       = NO_ANIMATION; // Into the library's animations, or none for the rest pose
+    r32 time          = 0.0f;         // Seconds into it, which loops
+    u32 faded         = NO_ANIMATION; // The one it fades from, or none once it's faded in
+    r32 faded_time    = 0.0f;         // Seconds into that one, which goes on as it fades
+    r32 fade_time     = 0.0f;         // Seconds the fade has gone on
+    r32 fade_duration = 0.0f;         // Seconds it lasts
+};
+
+// Plays `animation` (into the library's animations) from its start, fading into it from
+// what was played over `fade` seconds (none for a cut), unless it plays it already. Back
+// to the one it's fading from, the fade turns around, from where it is.
+void play_animation(Animation_State *state, u32 animation, r32 fade);
+
+// Moves the animation played on by `dt` seconds times `speed`, and its fade, and the
+// animation it fades from, by `dt` seconds.
+void advance_animation(Animation_State *state, r32 dt, r32 speed = 1.0f);
+
+// The skinned model's vertices posed by what `state` plays of the library's animations,
+// as push_posed_vertices() poses them: null when it plays none, the model has no skin,
+// or they don't fit in the commands.
+const Mesh_Vertex *push_posed_vertices(Render_Commands *commands, const Model &model, const Animation_State &state,
+                                       const Animation_Library &library);

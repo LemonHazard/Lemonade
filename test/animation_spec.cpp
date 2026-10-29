@@ -3,7 +3,6 @@
 
 #include "animation.h"
 #include "gltf.h"
-#include "level.h"
 
 #include <cmath>
 #include <cstring>
@@ -336,41 +335,41 @@ TEST_CASE("push_posed_vertices fades from one animation to another by the weight
     REQUIRE(push_posed_vertices(&commands, model, to_right, 0.0f, &to_left, 0.0f, 1.0f)->position.x == Approx(2.0f));
 }
 
-TEST_CASE("play_animation fades from what the entity played, and advance_animation moves the fade on", "[animation]")
+TEST_CASE("play_animation fades from what was played, and advance_animation moves the fade on", "[animation]")
 {
-    Entity entity = {};
-    play_animation(&entity, 3, 0.5f);
-    REQUIRE(entity.animation == 3);
-    REQUIRE(entity.faded_animation == NO_ANIMATION); // Nothing to fade from
+    Animation_State state = {};
+    play_animation(&state, 3, 0.5f);
+    REQUIRE(state.current == 3);
+    REQUIRE(state.faded == NO_ANIMATION); // Nothing to fade from
 
-    advance_animation(&entity, 1.0f, 2.0f);
-    REQUIRE(entity.animation_time == 2.0f);
+    advance_animation(&state, 1.0f, 2.0f);
+    REQUIRE(state.time == 2.0f);
 
-    play_animation(&entity, 3, 0.5f); // Plays it already: goes on
-    REQUIRE(entity.animation_time == 2.0f);
+    play_animation(&state, 3, 0.5f); // Plays it already: goes on
+    REQUIRE(state.time == 2.0f);
 
-    play_animation(&entity, 5, 0.5f);
-    REQUIRE(entity.animation == 5);
-    REQUIRE(entity.animation_time == 0.0f);
-    REQUIRE(entity.faded_animation == 3);
-    REQUIRE(entity.faded_time == 2.0f);
+    play_animation(&state, 5, 0.5f);
+    REQUIRE(state.current == 5);
+    REQUIRE(state.time == 0.0f);
+    REQUIRE(state.faded == 3);
+    REQUIRE(state.faded_time == 2.0f);
 
-    advance_animation(&entity, 0.125f, 2.0f);
-    REQUIRE(entity.animation_time == 0.25f);
-    REQUIRE(entity.faded_time == 2.125f);
-    REQUIRE(entity.fade_time == 0.125f);
+    advance_animation(&state, 0.125f, 2.0f);
+    REQUIRE(state.time == 0.25f);
+    REQUIRE(state.faded_time == 2.125f);
+    REQUIRE(state.fade_time == 0.125f);
 
     // Back to the one it's fading from: the fade turns around, from where it is.
-    play_animation(&entity, 3, 0.5f);
-    REQUIRE(entity.animation == 3);
-    REQUIRE(entity.animation_time == 2.125f);
-    REQUIRE(entity.faded_animation == 5);
-    REQUIRE(entity.fade_time == 0.375f);
+    play_animation(&state, 3, 0.5f);
+    REQUIRE(state.current == 3);
+    REQUIRE(state.time == 2.125f);
+    REQUIRE(state.faded == 5);
+    REQUIRE(state.fade_time == 0.375f);
 
-    advance_animation(&entity, 0.125f);
-    REQUIRE(entity.faded_animation == NO_ANIMATION); // Faded in
+    advance_animation(&state, 0.125f);
+    REQUIRE(state.faded == NO_ANIMATION); // Faded in
 
-    play_animation(&entity, 7, 0.0f); // A cut
-    REQUIRE(entity.animation == 7);
-    REQUIRE(entity.faded_animation == NO_ANIMATION);
+    play_animation(&state, 7, 0.0f); // A cut
+    REQUIRE(state.current == 7);
+    REQUIRE(state.faded == NO_ANIMATION);
 }
