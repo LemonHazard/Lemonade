@@ -63,6 +63,7 @@ local GAME_ENGINE_SOURCES = {
    engine_path("src/world_game.cpp"),
    engine_path("src/json.cpp"),
    engine_path("src/model.cpp"),
+   engine_path("src/animation.cpp"),
    engine_path("src/palette.cpp"),
    engine_path("src/gltf.cpp"),
    engine_path("src/png.cpp"),

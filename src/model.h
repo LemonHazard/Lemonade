@@ -5,7 +5,10 @@
 #include "material.h"
 
 // Models, as load_glb() loads them: one mesh, drawn in parts that each have their own
-// material. Like meshes, they stay where the game keeps them, and point into its memory.
+// material, and the skin that poses it, if it has one (see animation.h). Like meshes,
+// they stay where the game keeps them, and point into its memory.
+
+struct Skin;
 
 constexpr u32 MODEL_MAX_PARTS = 16;
 
@@ -18,9 +21,10 @@ struct Model_Part
 
 struct Model
 {
-    Mesh       mesh;
-    u32        part_count;
-    Model_Part parts[MODEL_MAX_PARTS];
+    Mesh        mesh;
+    u32         part_count;
+    Model_Part  parts[MODEL_MAX_PARTS];
+    const Skin *skin; // None for a model that isn't skinned
 };
 
 // The textures models' materials use, loaded once each however many models use them.
